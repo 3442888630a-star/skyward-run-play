@@ -27,6 +27,7 @@ import {
   buildAirfieldMesh,
   buildCloudsMesh,
   buildDetailTextureCanvas,
+  buildEmissiveMesh,
   buildGroundTextureCanvas,
   buildLightDotMesh,
   buildMountainBandMesh,
@@ -521,7 +522,11 @@ const CLOUD_VS = `
 `;
 
 const CLOUD_FS = `
+  #ifdef GL_FRAGMENT_PRECISION_HIGH
+  precision highp float;
+  #else
   precision mediump float;
+  #endif
   varying vec3 vWorldPos;
   varying vec3 vNormal;
   varying vec3 vColor;
@@ -537,7 +542,9 @@ const CLOUD_FS = `
   void main() {
     vec3 n = normalize(vNormal);
     vec3 l = normalize(uSunDir);
-    vec3 v = normalize(uCamPos - vWorldPos);
+    vec3 toCam = uCamPos - vWorldPos;
+    float dist = length(toCam);
+    vec3 v = toCam / max(dist, 1e-4);
     float ndv = max(dot(n, v), 0.0);
 
     // Two-octave internal vapor detail for soft photographic puff breakup
@@ -546,7 +553,7 @@ const CLOUD_FS = `
     float puffNoise = n1 * 0.65 + n2 * 0.35;
 
     // Gentle wide Fresnel feathering and natural cloud translucency (no opaque blob / cutoff)
-    float fresnelFade = pow(ndv, 1.65);
+    float fresnelFade = pow(max(ndv, 1e-4), 1.65);
     float alpha = clamp(fresnelFade * (0.56 + 0.50 * puffNoise) * 0.84, 0.0, 0.86);
     if (uDepthOnly > 0.5) {
       if (alpha < 0.04) discard;
@@ -554,29 +561,64 @@ const CLOUD_FS = `
       return;
     }
 
-    // Soft wrap-lit cumulus shading: low contrast between warm-lit crown and luminous base
-    float ndl = dot(n, l);
-    float sunSide = smoothstep(-0.75, 0.85, ndl * 0.78 + (puffNoise - 0.5) * 0.35);
-    float topBias = clamp(n.y * 0.45 + 0.55, 0.0, 1.0);
+    // Effectively unlit vertical gradient: warm pink/amber base -> soft white mid -> warm white crown
+    float topBias = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
+    vec3 baseCol = vec3(0.94, 0.80, 0.72);
+    vec3 midCol = vec3(0.99, 0.93, 0.88);
+    vec3 crownCol = vec3(1.05, 1.00, 0.94);
+    vec3 gradCol = topBias < 0.5
+      ? mix(baseCol, midCol, topBias * 2.0)
+      : mix(midCol, crownCol, (topBias - 0.5) * 2.0);
 
-    vec3 shadowCol = mix(vec3(0.75, 0.73, 0.80), vec3(0.90, 0.87, 0.90), topBias);
-    vec3 sunLitCol = mix(vec3(1.02, 0.91, 0.80), vec3(1.08, 1.01, 0.92), topBias);
-    vec3 col = mix(shadowCol, sunLitCol, sunSide) * vColor;
+    // Gentle sun-side & silver-lining tint: strictly additive, never subtracts below gradient base
+    float sunSide = smoothstep(-0.35, 0.90, dot(n, l));
+    float backScatter = pow(max(dot(-v, l), 1e-4), 4.0);
+    vec3 col = gradCol * max(vColor, vec3(0.92));
+    col *= 0.93 + 0.09 * puffNoise;
+    col += uSunColor * (0.14 * sunSide + backScatter * (0.16 + 0.14 * (1.0 - ndv)));
 
-    col *= 0.94 + 0.12 * puffNoise;
-    float backScatter = pow(max(dot(-v, l), 0.0), 4.0);
-    col += uSunColor * (backScatter * (0.20 + 0.18 * (1.0 - ndv)));
-
-    // Thin outer vapor edges brighten via multiple scattering so no dark rim/outline ever forms
-    vec3 edgeScatter = mix(vec3(0.92, 0.86, 0.86), sunLitCol, 0.45 + 0.45 * sunSide);
-    col = mix(edgeScatter, col, smoothstep(0.05, 0.65, ndv));
-
-    float dist = length(uCamPos - vWorldPos);
-    float fog = 1.0 - exp(-pow(dist * uFogDensity * 0.72, 1.65));
-    float sunAmt = pow(max(dot(-v, l), 0.0), 5.0);
-    vec3 fogCol = mix(uFogColor, uSunColor * 0.95, sunAmt * 0.45);
+    // Distance fog toward bright warm fog/sun color, followed by hard brightness floor
+    float fog = 1.0 - exp(-pow(max(dist * uFogDensity * 0.65, 1e-4), 1.65));
+    float sunAmt = pow(max(dot(-v, l), 1e-4), 5.0);
+    vec3 fogCol = mix(max(uFogColor, vec3(0.80, 0.60, 0.50)), uSunColor * 0.98, sunAmt * 0.45);
     vec3 finalCol = mix(col, fogCol, clamp(fog, 0.0, 1.0));
+    finalCol = max(finalCol, vec3(0.62, 0.58, 0.60));
     gl_FragColor = vec4(gradeAndToneMap(finalCol), alpha);
+  }
+`;
+
+const EMISSIVE_VS = `
+  attribute vec3 aPosition;
+  attribute vec3 aColor;
+  uniform mat4 uProjView;
+  varying vec3 vWorldPos;
+  varying vec3 vColor;
+  void main() {
+    vWorldPos = aPosition;
+    vColor = aColor;
+    gl_Position = uProjView * vec4(aPosition, 1.0);
+  }
+`;
+
+const EMISSIVE_FS = `
+  #ifdef GL_FRAGMENT_PRECISION_HIGH
+  precision highp float;
+  #else
+  precision mediump float;
+  #endif
+  varying vec3 vWorldPos;
+  varying vec3 vColor;
+  uniform vec3 uCamPos;
+  uniform vec3 uFogColor;
+  uniform float uFogDensity;
+  ${TONEMAP_GLSL}
+
+  void main() {
+    float dist = length(uCamPos - vWorldPos);
+    float fog = 1.0 - exp(-pow(max(dist * uFogDensity * 0.42, 1e-4), 1.65));
+    vec3 col = mix(vColor, max(uFogColor, vec3(0.88, 0.58, 0.40)), clamp(fog * 0.35, 0.0, 0.35));
+    col = max(col, vColor * 0.68);
+    gl_FragColor = vec4(gradeAndToneMap(col), 1.0);
   }
 `;
 
@@ -799,6 +841,7 @@ export function createRenderer3D(canvas, random) {
   const solidProg = createProgram(gl, SOLID_VS, SOLID_FS);
   const waterProg = createProgram(gl, WATER_VS, WATER_FS);
   const cloudProg = createProgram(gl, CLOUD_VS, CLOUD_FS);
+  const emissiveProg = createProgram(gl, EMISSIVE_VS, EMISSIVE_FS);
   const glowProg = createProgram(gl, GLOW_VS, GLOW_FS);
   const particleProg = createProgram(gl, PARTICLE_VS, PARTICLE_FS);
   const trailProg = createProgram(gl, TRAIL_VS, TRAIL_FS);
@@ -950,6 +993,7 @@ export function createRenderer3D(canvas, random) {
   const runwayDecalsGpu = uploadMesh(gl, buildRunwayDecalsMesh());
   const airfieldGpu = uploadMesh(gl, buildAirfieldMesh());
   const villageGpu = uploadMesh(gl, buildVillageMesh());
+  const emissiveGpu = uploadMesh(gl, buildEmissiveMesh());
   const treesGpu = uploadMesh(gl, buildTreesMesh(random));
   const cloudsGpu = uploadMesh(gl, buildCloudsMesh(random));
   const planeGpu = uploadMesh(gl, buildPlaneMesh());
@@ -1099,6 +1143,15 @@ export function createRenderer3D(canvas, random) {
     uWorldHalf: gl.getUniformLocation(cloudProg, 'uWorldHalf'),
     uDetailTex: gl.getUniformLocation(cloudProg, 'uDetailTex'),
     uDepthOnly: gl.getUniformLocation(cloudProg, 'uDepthOnly'),
+  };
+
+  const emissiveLoc = {
+    aPosition: gl.getAttribLocation(emissiveProg, 'aPosition'),
+    aColor: gl.getAttribLocation(emissiveProg, 'aColor'),
+    uProjView: gl.getUniformLocation(emissiveProg, 'uProjView'),
+    uCamPos: gl.getUniformLocation(emissiveProg, 'uCamPos'),
+    uFogColor: gl.getUniformLocation(emissiveProg, 'uFogColor'),
+    uFogDensity: gl.getUniformLocation(emissiveProg, 'uFogDensity'),
   };
 
   const glowLoc = {
@@ -1612,6 +1665,22 @@ export function createRenderer3D(canvas, random) {
     bindSolidMesh(treesGpu, solidLoc);
     gl.drawArrays(gl.TRIANGLES, 0, treesGpu.vertexCount);
     disableSolidMesh(solidLoc);
+
+    // 2a. Unlit dusk emissive windows & main-street lights (depth-tested against buildings)
+    if (emissiveGpu.vertexCount > 0) {
+      gl.useProgram(emissiveProg);
+      gl.uniformMatrix4fv(emissiveLoc.uProjView, false, projViewMat);
+      gl.uniform3f(emissiveLoc.uCamPos, camState.pos.x, camState.pos.y, camState.pos.z);
+      gl.uniform3fv(emissiveLoc.uFogColor, PALETTE.fogColor);
+      gl.uniform1f(emissiveLoc.uFogDensity, PALETTE.fogDensity);
+      bindPosOnly(emissiveGpu, emissiveLoc.aPosition);
+      gl.bindBuffer(gl.ARRAY_BUFFER, emissiveGpu.colBuf);
+      gl.enableVertexAttribArray(emissiveLoc.aColor);
+      gl.vertexAttribPointer(emissiveLoc.aColor, 3, gl.FLOAT, false, 0, 0);
+      gl.drawArrays(gl.TRIANGLES, 0, emissiveGpu.vertexCount);
+      if (emissiveLoc.aPosition >= 0) gl.disableVertexAttribArray(emissiveLoc.aPosition);
+      if (emissiveLoc.aColor >= 0) gl.disableVertexAttribArray(emissiveLoc.aColor);
+    }
 
     // 2b. Drifting soft-edged cumulus clouds (depth pre-pass + alpha-blended outer envelope)
     gl.useProgram(cloudProg);

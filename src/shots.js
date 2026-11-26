@@ -31,27 +31,27 @@ export function stageShot(name, world) {
   const p = st.plane;
 
   if (name === 'play') {
-    // Mid-flight shot banking over Mirror Lake & Emerald Forest approaching Ring 5
-    st.ringsPassed = 4;
-    st.ringScore = 1380;
-    st.missionTime = 148.0;
-    p.fuel = 66;
-    p.pos.x = 1280;
-    p.pos.y = 185;
-    p.pos.z = -2420;
-    p.speed = 46;
-    p.throttle = 0.68;
-    world.setBasisFromHeadingPitchRoll(2.55, 0.02, 0.24);
+    // Mid-flight shot banking over expanded Oakwood Town approaching Ring 6
+    st.ringsPassed = 5;
+    st.ringScore = 1720;
+    st.missionTime = 192.0;
+    p.fuel = 52;
+    p.pos.x = 1850;
+    p.pos.y = 212;
+    p.pos.z = 400;
+    p.speed = 45;
+    p.throttle = 0.66;
+    world.setBasisFromHeadingPitchRoll(-2.62, -0.02, 0.16);
     p.vel.x = p.forward.x * p.speed;
     p.vel.y = p.forward.y * p.speed;
     p.vel.z = p.forward.z * p.speed;
     p.verticalSpeed = p.vel.y;
-    for (let i = 0; i < Math.round(6.5 / STEP); i += 1) {
-      world.step(STEP, autopilotTo(p, MISSION_RINGS[4], 46), false);
-      const r5 = MISSION_RINGS[4];
-      if (Math.hypot(p.pos.x - r5.x, p.pos.y - r5.y, p.pos.z - r5.z) < 95) break;
+    for (let i = 0; i < Math.round(5.0 / STEP); i += 1) {
+      world.step(STEP, autopilotTo(p, MISSION_RINGS[5], 45), false);
+      const r6 = MISSION_RINGS[5];
+      if (Math.hypot(p.pos.x - r6.x, p.pos.y - r6.y, p.pos.z - r6.z) < 680) break;
     }
-    st.toastText = 'Mirror Lake Cleared — Approaching Emerald Forest';
+    st.toastText = 'Emerald Forest Cleared — Approaching Oakwood Town';
     st.toastTimer = 2.4;
     return { screen: SCREEN_PLAY, best: st.ringScore };
   }

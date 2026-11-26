@@ -17,6 +17,9 @@ const FIELD_H = 140;
 
 const VILLAGE_CENTER = { x: -212, z: 65 };
 const TOWN_CENTER = { x: 1380, z: 1220 };
+const RIVER_HAMLET_CENTER = { x: 375, z: 2245 };
+const LAKE_VILLAGE_CENTER = { x: -1215, z: -1965 };
+const FARMLAND_HAMLET_CENTER = { x: -700, z: 2550 };
 
 /** Monotone cubic coordinate warp: ~18m cells near center, ~61m at 5200m edge. */
 function warpCoord(t) {
@@ -68,10 +71,16 @@ function airfieldFlatten(x, z) {
   return smooth01(dist / 140);
 }
 
+/** Distance outside a circular settlement pad (0 inside flatRadius, 1 outside blend). */
+function padFlatten(x, z, cx, cz, flatR, blendR) {
+  const dist = Math.hypot(x - cx, z - cz);
+  return smooth01((dist - flatR) / blendR);
+}
+
 /** Distance outside the Southeast town plateau (0 inside plateau, 1 outside). */
 function townFlatten(x, z) {
   const dist = Math.hypot(x - TOWN_CENTER.x, z - TOWN_CENTER.z);
-  return smooth01((dist - 270) / 210);
+  return smooth01((dist - 360) / 210);
 }
 
 /** Smoothly blended biome zone weights at world (x, z). */
@@ -145,13 +154,21 @@ export function terrainHeight(x, z) {
     h = lerp(h, 2.4 + nDetail * 2.2, marshPeninsula * 0.88);
   }
 
+  // Level settlement pads gently so all buildings sit flush
+  h = lerp(26, h, padFlatten(x, z, RIVER_HAMLET_CENTER.x, RIVER_HAMLET_CENTER.z, 98, 110));
+  const lakePad = padFlatten(x, z, LAKE_VILLAGE_CENTER.x, LAKE_VILLAGE_CENTER.z, 88, 90);
+  const lakeDryMask = smooth01((h - 0.8) / 2.4);
+  h = lerp(7.5, h, 1 - (1 - lakePad) * lakeDryMask);
+  h = lerp(52.5, h, padFlatten(x, z, FARMLAND_HAMLET_CENTER.x, FARMLAND_HAMLET_CENTER.z, 115, 115));
+
   // Level Southeast Town plateau gently at 24m
   const tf = townFlatten(x, z);
   h = lerp(24, h, tf);
 
-  // Flatten airfield plateau cleanly at RUNWAY.elevation (14m)
+  // Flatten airfield plateau & west terminal pad cleanly at RUNWAY.elevation (14m)
   const af = airfieldFlatten(x, z);
   h = lerp(RUNWAY.elevation, h, af);
+  h = lerp(RUNWAY.elevation, h, padFlatten(x, z, -132, 206, 38, 45));
 
   return h;
 }
@@ -1350,10 +1367,84 @@ export function buildMountainBandMesh() {
   return b.toMesh();
 }
 
-function addHangar(b, cx, y0, cz) {
-  const w = 28;
-  const d = 34;
-  const wallH = 8.4;
+const NOOP_BUILDER = {
+  pushVert() {},
+  tri() {},
+  quad() {},
+  box() {},
+};
+
+function windowHash(x, z, idx) {
+  let h = Math.imul(Math.round(x * 10), 374761393) + Math.imul(Math.round(z * 10), 668265263) + Math.imul(idx + 1, 1442695041);
+  h = (h ^ (h >>> 13)) | 0;
+  h = Math.imul(h, 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+function emissiveAmber(x, z, idx) {
+  const h1 = windowHash(x, z, idx * 7 + 3);
+  const h2 = windowHash(x, z, idx * 13 + 9);
+  const v = 0.88 + h1 * 0.28;
+  return [1.0 * v, (0.58 + h2 * 0.08) * v, (0.24 + (1 - h2) * 0.08) * v];
+}
+
+function addEmissiveWindowQuad(ew, cx, baseY, cz, rotY, lx, ly, lz, w, h, faceDir, r, g, b) {
+  const c = Math.cos(rotY);
+  const s = Math.sin(rotY);
+  const pt = (x0, y0, z0) => [cx + x0 * c + z0 * s, baseY + y0, cz - x0 * s + z0 * c];
+  const hw = w * 0.5;
+  const hh = h * 0.5;
+  if (faceDir === '+z') {
+    ew.quad(...pt(lx - hw, ly - hh, lz), ...pt(lx + hw, ly - hh, lz), ...pt(lx + hw, ly + hh, lz), ...pt(lx - hw, ly + hh, lz), r, g, b);
+  } else if (faceDir === '-z') {
+    ew.quad(...pt(lx + hw, ly - hh, lz), ...pt(lx - hw, ly - hh, lz), ...pt(lx - hw, ly + hh, lz), ...pt(lx + hw, ly + hh, lz), r, g, b);
+  } else if (faceDir === '+x') {
+    ew.quad(...pt(lx, ly - hh, lz + hw), ...pt(lx, ly - hh, lz - hw), ...pt(lx, ly + hh, lz - hw), ...pt(lx, ly + hh, lz + hw), r, g, b);
+  } else {
+    ew.quad(...pt(lx, ly - hh, lz - hw), ...pt(lx, ly - hh, lz + hw), ...pt(lx, ly + hh, lz + hw), ...pt(lx, ly + hh, lz - hw), r, g, b);
+  }
+}
+
+function addHorizontalCylinderX(b, cx, cy, cz, radius, length, sides, rCol, gCol, bCol) {
+  const x0 = cx - length * 0.5;
+  const x1 = cx + length * 0.5;
+  for (let i = 0; i < sides; i += 1) {
+    const a0 = (i / sides) * Math.PI * 2;
+    const a1 = ((i + 1) / sides) * Math.PI * 2;
+    const ny0 = Math.cos(a0);
+    const nz0 = Math.sin(a0);
+    const ny1 = Math.cos(a1);
+    const nz1 = Math.sin(a1);
+    const y0 = cy + ny0 * radius;
+    const z0 = cz + nz0 * radius;
+    const y1 = cy + ny1 * radius;
+    const z1 = cz + nz1 * radius;
+    const shade0 = 0.84 + 0.16 * ny0;
+    const shade1 = 0.84 + 0.16 * ny1;
+
+    b.pushVert(x0, y0, z0, 0, ny0, nz0, rCol * shade0, gCol * shade0, bCol * shade0);
+    b.pushVert(x1, y0, z0, 0, ny0, nz0, rCol * shade0, gCol * shade0, bCol * shade0);
+    b.pushVert(x1, y1, z1, 0, ny1, nz1, rCol * shade1, gCol * shade1, bCol * shade1);
+
+    b.pushVert(x0, y0, z0, 0, ny0, nz0, rCol * shade0, gCol * shade0, bCol * shade0);
+    b.pushVert(x1, y1, z1, 0, ny1, nz1, rCol * shade1, gCol * shade1, bCol * shade1);
+    b.pushVert(x0, y1, z1, 0, ny1, nz1, rCol * shade1, gCol * shade1, bCol * shade1);
+
+    // End caps
+    b.pushVert(x0, cy, cz, -1, 0, 0, rCol * 0.88, gCol * 0.88, bCol * 0.88);
+    b.pushVert(x0, y1, z1, -1, 0, 0, rCol * 0.88, gCol * 0.88, bCol * 0.88);
+    b.pushVert(x0, y0, z0, -1, 0, 0, rCol * 0.88, gCol * 0.88, bCol * 0.88);
+
+    b.pushVert(x1, cy, cz, 1, 0, 0, rCol * 0.92, gCol * 0.92, bCol * 0.92);
+    b.pushVert(x1, y0, z0, 1, 0, 0, rCol * 0.92, gCol * 0.92, bCol * 0.92);
+    b.pushVert(x1, y1, z1, 1, 0, 0, rCol * 0.92, gCol * 0.92, bCol * 0.92);
+  }
+}
+
+function addHangar(b, ew, cx, y0, cz, scale = 1.0) {
+  const w = 28 * scale;
+  const d = 34 * scale;
+  const wallH = 8.4 * scale;
   const hw = w * 0.5;
   const hd = d * 0.5;
 
@@ -1367,12 +1458,17 @@ function addHangar(b, cx, y0, cz) {
 
   // Dark hangar interior floor & rear wall + open sliding bay doors facing apron (+X)
   b.box(cx, y0 + 0.16, cz, w - 1.2, 0.10, d - 1.2, 0.22, 0.23, 0.25);
-  b.box(cx + hw - 0.35, y0 + wallH * 0.5, cz - 13.0, 0.7, wallH, 8.0, 0.46, 0.48, 0.50);
-  b.box(cx + hw - 0.35, y0 + wallH * 0.5, cz + 13.0, 0.7, wallH, 8.0, 0.46, 0.48, 0.50);
-  b.box(cx + hw - 0.35, y0 + wallH - 0.9, cz, 0.7, 1.8, 18.0, 0.34, 0.38, 0.44);
+  const doorSideD = 8.0 * scale;
+  const doorSideOffset = 13.0 * scale;
+  b.box(cx + hw - 0.35, y0 + wallH * 0.5, cz - doorSideOffset, 0.7, wallH, doorSideD, 0.46, 0.48, 0.50);
+  b.box(cx + hw - 0.35, y0 + wallH * 0.5, cz + doorSideOffset, 0.7, wallH, doorSideD, 0.46, 0.48, 0.50);
+  b.box(cx + hw - 0.35, y0 + wallH - 0.9 * scale, cz, 0.7, 1.8 * scale, 18.0 * scale, 0.34, 0.38, 0.44);
   // Partially slid door leaves
-  b.box(cx + hw + 0.15, y0 + 3.6, cz - 9.2, 0.35, 7.2, 5.2, 0.30, 0.35, 0.42);
-  b.box(cx + hw + 0.15, y0 + 3.6, cz + 9.2, 0.35, 7.2, 5.2, 0.30, 0.35, 0.42);
+  b.box(cx + hw + 0.15, y0 + 3.6 * scale, cz - 9.2 * scale, 0.35, 7.2 * scale, 5.2 * scale, 0.30, 0.35, 0.42);
+  b.box(cx + hw + 0.15, y0 + 3.6 * scale, cz + 9.2 * scale, 0.35, 7.2 * scale, 5.2 * scale, 0.30, 0.35, 0.42);
+
+  // Warm interior hangar light visible through open bay
+  addEmissiveWindowQuad(ew, cx + hw - 0.8, y0, cz, 0, 0, wallH * 0.46, 0, 10.0 * scale, 3.6 * scale, '+x', 1.05, 0.68, 0.32);
 
   // Vertical exterior structural wall ribs
   for (let z = -hd + 3; z <= hd - 3; z += 5.5) {
@@ -1381,8 +1477,8 @@ function addHangar(b, cx, y0, cz) {
 
   // Curved barrel-vault roof (smooth arched corrugated metal in muted slate-blue/charcoal)
   const archSegs = 10;
-  const archR = hw + 1.2;
-  const archH = 4.4;
+  const archR = hw + 1.2 * scale;
+  const archH = 4.4 * scale;
   const z0 = cz - hd - 0.8;
   const z1 = cz + hd + 0.8;
   for (let i = 0; i < archSegs; i += 1) {
@@ -1403,16 +1499,18 @@ function addHangar(b, cx, y0, cz) {
   }
 
   // Muted dark terracotta fascia band along front/back eaves
-  b.box(cx, y0 + wallH + 0.15, z1 + 0.1, w + 2.4, 0.55, 0.25, 0.54, 0.27, 0.22);
-  b.box(cx, y0 + wallH + 0.15, z0 - 0.1, w + 2.4, 0.55, 0.25, 0.54, 0.27, 0.22);
+  b.box(cx, y0 + wallH + 0.15, z1 + 0.1, w + 2.4 * scale, 0.55, 0.25, 0.54, 0.27, 0.22);
+  b.box(cx, y0 + wallH + 0.15, z0 - 0.1, w + 2.4 * scale, 0.55, 0.25, 0.54, 0.27, 0.22);
 
-  // Small office annex on north side of hangar
-  b.box(cx - 2, y0 + 2.4, cz - hd - 4.2, 14, 4.8, 7.6, 0.74, 0.72, 0.67);
-  b.box(cx - 2, y0 + 5.0, cz - hd - 4.2, 14.8, 0.5, 8.4, 0.34, 0.37, 0.41);
-  b.box(cx + 5.1, y0 + 2.5, cz - hd - 4.2, 0.15, 1.5, 4.2, 0.18, 0.25, 0.32);
+  // Small office annex on north side of main hangar
+  if (scale > 0.85) {
+    b.box(cx - 2, y0 + 2.4, cz - hd - 4.2, 14, 4.8, 7.6, 0.74, 0.72, 0.67);
+    b.box(cx - 2, y0 + 5.0, cz - hd - 4.2, 14.8, 0.5, 8.4, 0.34, 0.37, 0.41);
+    addEmissiveWindowQuad(ew, cx + 5.08, y0, cz - hd - 4.2, 0, 0, 2.5, 0, 4.2, 1.5, '+x', 1.06, 0.66, 0.30);
+  }
 }
 
-function addControlTower(b, cx, y0, cz) {
+function addControlTower(b, ew, cx, y0, cz) {
   // Concrete base & tapered tower shaft
   b.box(cx, y0 + 0.3, cz, 11.5, 0.6, 11.5, 0.45, 0.45, 0.43);
   b.box(cx, y0 + 8.5, cz, 7.8, 16.4, 7.8, 0.72, 0.70, 0.66);
@@ -1422,6 +1520,9 @@ function addControlTower(b, cx, y0, cz) {
       b.box(cx + sx, y0 + 8.5, cz + sz, 0.85, 16.4, 0.85, 0.58, 0.57, 0.54);
     }
   }
+  // Shaft stairwell emissive slit windows
+  addEmissiveWindowQuad(ew, cx, y0, cz, 0, 3.98, 7.5, 0, 1.2, 2.2, '+x', 0.96, 0.60, 0.26);
+  addEmissiveWindowQuad(ew, cx, y0, cz, 0, 3.98, 12.2, 0, 1.2, 2.2, '+x', 1.02, 0.64, 0.28);
 
   // Catwalk / observation gallery floor & railing collar
   b.box(cx, y0 + 17.1, cz, 13.6, 0.8, 13.6, 0.46, 0.47, 0.49);
@@ -1442,6 +1543,14 @@ function addControlTower(b, cx, y0, cz) {
   b.quad(cx + bHalf, cabBot, cz + bHalf, cx + bHalf, cabBot, cz - bHalf, cx + tHalf, cabTop, cz - tHalf, cx + tHalf, cabTop, cz + tHalf, ...glassCol);
   b.quad(cx - bHalf, cabBot, cz - bHalf, cx - bHalf, cabBot, cz + bHalf, cx - tHalf, cabTop, cz + tHalf, cx - tHalf, cabTop, cz - tHalf, ...glassCol);
 
+  // Warm interior instrument/console glow band slightly proud on cab panes
+  const gBot = y0 + 18.0;
+  const gTop = y0 + 20.6;
+  const gbH = 4.82;
+  const gtH = 5.55;
+  ew.quad(cx - gbH, gBot, cz + gbH, cx + gbH, gBot, cz + gbH, cx + gtH, gTop, cz + gtH, cx - gtH, gTop, cz + gtH, 1.05, 0.66, 0.30);
+  ew.quad(cx + gbH, gBot, cz + gbH, cx + gbH, gBot, cz - gbH, cx + gtH, gTop, cz - gtH, cx + gtH, gTop, cz + gtH, 1.08, 0.68, 0.32);
+
   // Window mullions on cab corners
   for (const sx of [-1, 1]) {
     for (const sz of [-1, 1]) {
@@ -1456,24 +1565,106 @@ function addControlTower(b, cx, y0, cz) {
   b.box(cx - 1.8, cabTop + 2.3, cz + 1.5, 2.2, 0.9, 1.2, 0.78, 0.78, 0.76);
 }
 
-export function buildAirfieldMesh() {
-  const b = createBuilder();
+function addAirfieldTerminal(b, ew, cx, cz) {
+  const baseY = sampleMeshHeight(cx, cz);
+  const w = 18;
+  const d = 34;
+  const wallH = 6.8;
+  const hw = w * 0.5;
+  const hd = d * 0.5;
+
+  // Foundation slab sunk 1.4m for flush grounding
+  b.box(cx, baseY + (wallH - 1.4) * 0.5, cz, w, wallH + 1.4, d, 0.76, 0.74, 0.69);
+  b.box(cx, baseY + 0.16, cz, w + 3.2, 0.32, d + 3.2, 0.44, 0.45, 0.44);
+
+  // Mid-floor architectural band & overhanging flat roof + apron canopy
+  b.box(cx, baseY + 3.4, cz, w + 0.4, 0.45, d + 0.4, 0.52, 0.52, 0.50);
+  b.box(cx, baseY + wallH + 0.45, cz, w + 2.8, 0.9, d + 2.8, 0.30, 0.33, 0.38);
+  b.box(cx + 0.6, baseY + wallH + 1.0, cz, w + 1.2, 0.4, d + 1.2, 0.24, 0.26, 0.30);
+  // Apron-side covered walkway canopy (+X)
+  b.box(cx + hw + 1.8, baseY + 3.2, cz, 3.6, 0.32, d - 6.0, 0.34, 0.36, 0.40);
+  for (let z = -12; z <= 12; z += 6) {
+    b.box(cx + hw + 3.3, baseY + 1.6, cz + z, 0.26, 3.2, 0.26, 0.42, 0.44, 0.47);
+  }
+
+  // Long apron-side (+X) window strip across 2 floors (joins emissive pass)
+  for (let floor = 0; floor < 2; floor += 1) {
+    const wy = floor === 0 ? 1.85 : 5.05;
+    for (let i = -3; i <= 3; i += 1) {
+      const wz = i * 4.2;
+      const isLit = windowHash(cx + floor * 3, cz + wz, i + 10) < 0.72;
+      if (isLit) {
+        const [er, eg, eb] = emissiveAmber(cx + floor * 3, cz + wz, i + 10);
+        addEmissiveWindowQuad(ew, cx, baseY, cz, 0, hw + 0.08, wy, wz, 3.2, 1.75, '+x', er, eg, eb);
+      } else {
+        b.box(cx + hw + 0.06, baseY + wy, cz + wz, 0.12, 1.75, 3.2, 0.18, 0.24, 0.31);
+      }
+    }
+  }
+  // Landside (-X) & end windows
+  for (let i = -2; i <= 2; i += 1) {
+    const wz = i * 5.6;
+    if (windowHash(cx - 5, cz + wz, i) < 0.45) {
+      const [er, eg, eb] = emissiveAmber(cx - 5, cz + wz, i);
+      addEmissiveWindowQuad(ew, cx, baseY, cz, 0, -hw - 0.08, 4.9, wz, 3.0, 1.5, '-x', er, eg, eb);
+    } else {
+      b.box(cx - hw - 0.06, baseY + 4.9, cz + wz, 0.12, 1.5, 3.0, 0.18, 0.24, 0.31);
+    }
+  }
+  for (const sz of [-1, 1]) {
+    const [er, eg, eb] = emissiveAmber(cx, cz + sz * 20, 4);
+    addEmissiveWindowQuad(ew, cx, baseY, cz, 0, 0, 4.9, sz * (hd + 0.08), 8.0, 1.5, sz > 0 ? '+z' : '-z', er, eg, eb);
+  }
+}
+
+function addFuelFarm(b, cx, cz) {
+  const baseY = sampleMeshHeight(cx, cz);
+  // Concrete containment pad sunk 0.6m
+  b.box(cx, baseY - 0.1, cz, 12.5, 0.8, 18.0, 0.42, 0.42, 0.40);
+  // Low concrete containment bund curb
+  b.box(cx, baseY + 0.42, cz - 8.7, 12.5, 0.4, 0.5, 0.52, 0.52, 0.50);
+  b.box(cx, baseY + 0.42, cz + 8.7, 12.5, 0.4, 0.5, 0.52, 0.52, 0.50);
+
+  for (const dz of [-4.2, 4.2]) {
+    const tz = cz + dz;
+    // Two concrete cradles/saddles
+    b.box(cx - 2.3, baseY + 0.75, tz, 0.75, 1.1, 2.7, 0.48, 0.48, 0.46);
+    b.box(cx + 2.3, baseY + 0.75, tz, 0.75, 1.1, 2.7, 0.48, 0.48, 0.46);
+    // Horizontal cylindrical fuel tank
+    addHorizontalCylinderX(b, cx, baseY + 2.25, tz, 1.45, 7.6, 12, 0.84, 0.83, 0.80);
+    // Warm hazard/fuel stripe collar
+    addHorizontalCylinderX(b, cx + 1.8, baseY + 2.25, tz, 1.48, 0.65, 12, 0.78, 0.36, 0.20);
+  }
+  // Fuel pump dispenser cabinet & yellow safety bollards
+  b.box(cx + 4.8, baseY + 1.15, cz, 1.2, 1.7, 2.2, 0.68, 0.28, 0.22);
+  for (const bz of [-7.5, 0, 7.5]) {
+    b.box(cx + 6.0, baseY + 0.75, cz + bz, 0.28, 1.0, 0.28, 0.85, 0.68, 0.18);
+  }
+}
+
+function populateAirfield(b, ew) {
   const y0 = RUNWAY.elevation;
   const yApron = y0 + 0.06;
 
-  // Taxiway & concrete parking apron on west side
+  // Taxiway & concrete parking apron on west side (extended south for terminal frontage)
   flatRect(b, -76, -RUNWAY.halfWidth + 0.2, 36, 194, yApron, 0.32, 0.33, 0.35);
+  flatRect(b, -124, -40, 186, 228, yApron, 0.32, 0.33, 0.35);
   // Taxiway connector bands
   flatRect(b, -74, -RUNWAY.halfWidth, 114, 136, yApron + 0.01, 0.26, 0.27, 0.30);
   flatRect(b, -74, -RUNWAY.halfWidth, 152, 174, yApron + 0.01, 0.26, 0.27, 0.30);
+  flatRect(b, -74, -RUNWAY.halfWidth, 190, 212, yApron + 0.01, 0.26, 0.27, 0.30);
   // Subtle yellow apron taxi guideline
-  flatRect(b, -62, -61.3, 44, 186, yApron + 0.03, 0.78, 0.60, 0.20);
+  flatRect(b, -62, -61.3, 44, 212, yApron + 0.03, 0.78, 0.60, 0.20);
   flatRect(b, -62, -22, 124.5, 125.2, yApron + 0.03, 0.78, 0.60, 0.20);
   flatRect(b, -62, -22, 162.5, 163.2, yApron + 0.03, 0.78, 0.60, 0.20);
+  flatRect(b, -118, -22, 201.0, 201.7, yApron + 0.03, 0.78, 0.60, 0.20);
 
-  // Realistic Hangar & Control Tower
-  addHangar(b, -86, y0, 130);
-  addControlTower(b, -74, y0, 24);
+  // Realistic Hangars, Control Tower, Terminal & Fuel Farm (all west of runway & clear of approach funnel)
+  addHangar(b, ew, -86, y0, 130, 1.0);
+  addHangar(b, ew, -88, y0, 72, 0.72);
+  addControlTower(b, ew, -74, y0, 24);
+  addAirfieldTerminal(b, ew, -134, 208);
+  addFuelFarm(b, -114, 98);
 
   // Tapered windsock mast + striped windsock cone near threshold
   addSmoothCylinder(b, -32, y0, 250, 0.18, 0.10, 9.0, 6, 0.72, 0.74, 0.76);
@@ -1501,7 +1692,11 @@ export function buildAirfieldMesh() {
   // Country asphalt/gravel road connecting the village to the airfield service area
   addRoadRibbon(b, ROAD_SAMPLES_MAIN, 3.0, 1.1, 0.28, 0.27, 0.26);
   addRoadRibbon(b, ROAD_SAMPLES_LANE, 2.3, 0.9, 0.34, 0.32, 0.29);
+}
 
+export function buildAirfieldMesh() {
+  const b = createBuilder();
+  populateAirfield(b, NOOP_BUILDER);
   return b.toMesh();
 }
 
@@ -1526,7 +1721,7 @@ const VILLAGE_HOUSES = [
   { x: 162, z: 182, rotY: -0.55, w: 11.2, d: 16.0, wallH: 5.0, roofH: 3.8, wall: [0.68, 0.65, 0.58], roof: [0.44, 0.27, 0.21] },
 ];
 
-function addHouse(b, hSpec) {
+function addHouse(b, hSpec, ew = NOOP_BUILDER, litProb = 0.42) {
   const { x, z, rotY, w, d, wallH, roofH, wall, roof } = hSpec;
   const baseY = sampleMeshHeight(x, z);
   const hw = w * 0.5;
@@ -1571,58 +1766,263 @@ function addHouse(b, hSpec) {
   const [chX, , chZ] = pt(hw * 0.45, 0, -hd * 0.25);
   b.box(chX, baseY + wallH + roofH * 0.72, chZ, 1.1, 2.2, 1.1, 0.50, 0.27, 0.22, rotY);
 
-  // Front door & muted dusk-lit/glass windows
+  // Front door & windows (lit windows go ONLY into emissive mesh to avoid z-fighting)
   const [doorX, , doorZ] = pt(0, 0, hd + 0.08);
   b.box(doorX, baseY + 1.15, doorZ, 1.4, 2.3, 0.16, 0.30, 0.20, 0.14, rotY);
 
-  const winOffsets = [
-    [-hw * 0.55, 2.6, hd + 0.07, 1.3, 1.1, 0.12],
-    [hw * 0.55, 2.6, hd + 0.07, 1.3, 1.1, 0.12],
-    [0, 2.6, -hd - 0.07, 1.4, 1.1, 0.12],
-    [hw + 0.07, 2.6, -hd * 0.42, 0.12, 1.1, 1.3],
-    [hw + 0.07, 2.6, hd * 0.42, 0.12, 1.1, 1.3],
-    [-hw - 0.07, 2.6, -hd * 0.42, 0.12, 1.1, 1.3],
-    [-hw - 0.07, 2.6, hd * 0.42, 0.12, 1.1, 1.3],
+  const winDefs = [
+    [-hw * 0.55, 2.6, hd + 0.08, 1.45, 1.25, '+z'],
+    [hw * 0.55, 2.6, hd + 0.08, 1.45, 1.25, '+z'],
+    [0, 2.6, -hd - 0.08, 1.55, 1.25, '-z'],
+    [hw + 0.08, 2.6, -hd * 0.42, 1.45, 1.25, '+x'],
+    [hw + 0.08, 2.6, hd * 0.42, 1.45, 1.25, '+x'],
+    [-hw - 0.08, 2.6, -hd * 0.42, 1.45, 1.25, '-x'],
+    [-hw - 0.08, 2.6, hd * 0.42, 1.45, 1.25, '-x'],
   ];
-  for (let i = 0; i < winOffsets.length; i += 1) {
-    const [wlx, wly, wlz, wsx, wsy, wsz] = winOffsets[i];
-    const [wx, , wz] = pt(wlx, 0, wlz);
-    const isLit = (i % 3 === 0);
-    const wr = isLit ? 0.88 : 0.20;
-    const wg = isLit ? 0.68 : 0.25;
-    const wb = isLit ? 0.38 : 0.31;
-    b.box(wx, baseY + wly, wz, wsx, wsy, wsz, wr, wg, wb, rotY);
+  for (let i = 0; i < winDefs.length; i += 1) {
+    const [wlx, wly, wlz, ww, wh, dir] = winDefs[i];
+    const isLit = windowHash(x, z, i) < litProb;
+    if (isLit) {
+      const [er, eg, eb] = emissiveAmber(x, z, i);
+      addEmissiveWindowQuad(ew, x, baseY, z, rotY, wlx, wly, wlz, ww, wh, dir, er, eg, eb);
+    } else {
+      const [wx, , wz] = pt(wlx, 0, wlz);
+      const isX = dir === '+x' || dir === '-x';
+      b.box(wx, baseY + wly, wz, isX ? 0.12 : ww, wh, isX ? ww : 0.12, 0.19, 0.24, 0.30, rotY);
+    }
   }
 }
 
-function addTownChurch(b, x, z, rotY) {
+function addBarn(b, ew, spec, litProb = 0.40) {
+  const { x, z, rotY, w = 13.0, d = 18.5, wallH = 5.6, roofH = 4.2, wall = [0.58, 0.29, 0.22], roof = [0.26, 0.28, 0.33] } = spec;
+  const baseY = sampleMeshHeight(x, z);
+  const hw = w * 0.5;
+  const hd = d * 0.5;
+  const eaveX = hw + 0.7;
+  const eaveZ = hd + 0.7;
+  const eaveY = baseY + wallH - 0.15;
+  const ridgeY = baseY + wallH + roofH;
+  const c = Math.cos(rotY);
+  const s = Math.sin(rotY);
+  const pt = (lx, wy, lz) => [x + lx * c + lz * s, wy, z - lx * s + lz * c];
+
+  b.box(x, baseY + (wallH - 1.6) * 0.5, z, w, wallH + 1.6, d, wall[0], wall[1], wall[2], rotY);
+  b.tri(...pt(0, ridgeY, hd), ...pt(-hw, baseY + wallH, hd), ...pt(hw, baseY + wallH, hd), wall[0] * 0.94, wall[1] * 0.94, wall[2] * 0.94);
+  b.tri(...pt(0, ridgeY, -hd), ...pt(hw, baseY + wallH, -hd), ...pt(-hw, baseY + wallH, -hd), wall[0] * 0.87, wall[1] * 0.87, wall[2] * 0.87);
+
+  const rF = pt(0, ridgeY, eaveZ);
+  const rB = pt(0, ridgeY, -eaveZ);
+  const eRF = pt(eaveX, eaveY, eaveZ);
+  const eRB = pt(eaveX, eaveY, -eaveZ);
+  const eLF = pt(-eaveX, eaveY, eaveZ);
+  const eLB = pt(-eaveX, eaveY, -eaveZ);
+  b.quad(...rF, ...eRF, ...eRB, ...rB, roof[0], roof[1], roof[2]);
+  b.quad(...rB, ...eLB, ...eLF, ...rF, roof[0] * 0.90, roof[1] * 0.90, roof[2] * 0.90);
+  b.quad(...rB, ...eRB, ...eRF, ...rF, roof[0] * 0.55, roof[1] * 0.55, roof[2] * 0.55);
+  b.quad(...rF, ...eLF, ...eLB, ...rB, roof[0] * 0.55, roof[1] * 0.55, roof[2] * 0.55);
+
+  // Large framed barn doors (+Z)
+  const [bdX, , bdZ] = pt(0, 0, hd + 0.08);
+  b.box(bdX, baseY + 2.0, bdZ, 3.8, 3.8, 0.18, 0.82, 0.79, 0.74, rotY);
+  b.box(bdX, baseY + 2.0, bdZ + 0.06, 3.3, 3.4, 0.12, wall[0] * 0.78, wall[1] * 0.78, wall[2] * 0.78, rotY);
+
+  // Hayloft & side windows
+  const barnWins = [
+    [0, wallH + 1.4, hd + 0.08, 1.5, 1.3, '+z'],
+    [hw + 0.08, 2.8, -hd * 0.35, 1.4, 1.1, '+x'],
+    [hw + 0.08, 2.8, hd * 0.35, 1.4, 1.1, '+x'],
+    [-hw - 0.08, 2.8, 0, 1.5, 1.1, '-x'],
+  ];
+  for (let i = 0; i < barnWins.length; i += 1) {
+    const [wlx, wly, wlz, ww, wh, dir] = barnWins[i];
+    if (windowHash(x, z, i + 20) < litProb) {
+      const [er, eg, eb] = emissiveAmber(x, z, i + 20);
+      addEmissiveWindowQuad(ew, x, baseY, z, rotY, wlx, wly, wlz, ww, wh, dir, er, eg, eb);
+    } else {
+      const [wx, , wz] = pt(wlx, 0, wlz);
+      const isX = dir === '+x' || dir === '-x';
+      b.box(wx, baseY + wly, wz, isX ? 0.12 : ww, wh, isX ? ww : 0.12, 0.20, 0.23, 0.28, rotY);
+    }
+  }
+}
+
+function addSilo(b, cx, cz, radius = 2.6, h = 11.2) {
+  const baseY = sampleMeshHeight(cx, cz);
+  addSmoothCylinder(b, cx, baseY - 1.2, cz, radius, radius * 0.98, h + 1.2, 12, 0.72, 0.73, 0.72, 1.04);
+  // Subtle galvanized dome cap (3 stepped rings)
+  addSmoothCylinder(b, cx, baseY + h, cz, radius * 1.02, radius * 0.78, 1.1, 12, 0.64, 0.67, 0.70, 1.05);
+  addSmoothCone(b, cx, baseY + h + 1.1, cz, 1.6, radius * 0.78, 12, 0.68, 0.70, 0.73);
+}
+
+function addTownChurch(b, ew, x, z, rotY) {
   const baseY = sampleMeshHeight(x, z);
   const w = 13;
   const d = 24;
   const wallH = 8.2;
   const roofH = 5.4;
-  addHouse(b, { x, z, rotY, w, d, wallH, roofH, wall: [0.80, 0.77, 0.72], roof: [0.27, 0.29, 0.34] });
+  addHouse(b, { x, z, rotY, w, d, wallH, roofH, wall: [0.80, 0.77, 0.72], roof: [0.27, 0.29, 0.34] }, ew, 0.72);
   const c = Math.cos(rotY);
   const s = Math.sin(rotY);
   const tx = x + (d * 0.42) * s;
   const tz = z + (d * 0.42) * c;
-  // Bell tower + steep spire
-  b.box(tx, baseY + 9.0, tz, 5.2, 18.0, 5.2, 0.79, 0.76, 0.70, rotY);
-  addSmoothCone(b, tx, baseY + 18.0, tz, 9.5, 3.4, 4, 0.24, 0.27, 0.32, rotY + Math.PI * 0.25);
-  // Warm arched nave windows
+
+  // Raised bell tower (~26.5 m total): lower stone shaft + upper clock/belfry stage + spire
+  b.box(tx, baseY + 8.0, tz, 5.4, 16.0, 5.4, 0.79, 0.76, 0.70, rotY);
+  b.box(tx, baseY + 18.2, tz, 5.0, 4.4, 5.0, 0.82, 0.79, 0.73, rotY);
+  b.box(tx, baseY + 16.1, tz, 5.8, 0.55, 5.8, 0.56, 0.55, 0.52, rotY);
+  addSmoothCone(b, tx, baseY + 20.4, tz, 6.1, 3.4, 4, 0.24, 0.27, 0.32, rotY + Math.PI * 0.25);
+
+  // Clock faces (light disc + dark hands) on all 4 faces near top of tower (y = 18.4 m)
+  const clockY = baseY + 18.4;
+  const faces = [
+    { lx: 0, lz: 2.55, rot: rotY },
+    { lx: 0, lz: -2.55, rot: rotY + Math.PI },
+    { lx: 2.55, lz: 0, rot: rotY + Math.PI * 0.5 },
+    { lx: -2.55, lz: 0, rot: rotY - Math.PI * 0.5 },
+  ];
+  for (let f = 0; f < faces.length; f += 1) {
+    const fc = faces[f];
+    const fx = tx + fc.lx * c + fc.lz * s;
+    const fz = tz - fc.lx * s + fc.lz * c;
+    const fCos = Math.cos(fc.rot);
+    const fSin = Math.sin(fc.rot);
+    // Light clock disc (8-gon) + dark rim backing
+    const segs = 8;
+    const rad = 1.15;
+    for (let k = 0; k < segs; k += 1) {
+      const a0 = (k / segs) * Math.PI * 2;
+      const a1 = ((k + 1) / segs) * Math.PI * 2;
+      const p1x = fx + Math.cos(a0) * rad * fCos;
+      const p1y = clockY + Math.sin(a0) * rad;
+      const p1z = fz - Math.cos(a0) * rad * fSin;
+      const p2x = fx + Math.cos(a1) * rad * fCos;
+      const p2y = clockY + Math.sin(a1) * rad;
+      const p2z = fz - Math.cos(a1) * rad * fSin;
+      b.tri(fx, clockY, fz, p1x, p1y, p1z, p2x, p2y, p2z, 0.94, 0.91, 0.82);
+    }
+    // Dark hour & minute hands proud of disc
+    const hx = fx + 0.05 * fSin;
+    const hz = fz + 0.05 * fCos;
+    b.box(hx, clockY + 0.38, hz, 0.16, 0.85, 0.08, 0.14, 0.15, 0.18, fc.rot);
+    b.box(hx + 0.28 * fCos, clockY + 0.06, hz - 0.28 * fSin, 0.68, 0.14, 0.08, 0.14, 0.15, 0.18, fc.rot);
+  }
+
+  // Warm emissive arched nave windows
   for (let i = -1; i <= 1; i += 1) {
-    const wx = x + (w * 0.5 + 0.08) * c + (i * 6.0) * s;
-    const wz = z - (w * 0.5 + 0.08) * s + (i * 6.0) * c;
-    b.box(wx, baseY + 4.4, wz, 0.14, 3.2, 1.6, 0.94, 0.74, 0.38, rotY);
+    addEmissiveWindowQuad(ew, x, baseY, z, rotY, w * 0.5 + 0.09, 4.4, i * 6.0, 1.6, 3.2, '+x', 1.08, 0.68, 0.30);
+    addEmissiveWindowQuad(ew, x, baseY, z, rotY, -w * 0.5 - 0.09, 4.4, i * 6.0, 1.6, 3.2, '-x', 1.08, 0.68, 0.30);
   }
 }
 
-function addTownSchool(b, x, z, rotY) {
+function addTownSchool(b, ew, x, z, rotY) {
   // Larger two-wing civic/school building with clock cupola
-  addHouse(b, { x, z, rotY, w: 15, d: 30, wallH: 6.8, roofH: 4.2, wall: [0.74, 0.44, 0.34], roof: [0.28, 0.31, 0.36] });
+  addHouse(b, { x, z, rotY, w: 15, d: 30, wallH: 6.8, roofH: 4.2, wall: [0.74, 0.44, 0.34], roof: [0.28, 0.31, 0.36] }, ew, 0.65);
   const baseY = sampleMeshHeight(x, z);
   b.box(x, baseY + 11.8, z, 3.6, 3.2, 3.6, 0.84, 0.81, 0.75, rotY);
   addSmoothCone(b, x, baseY + 13.4, z, 3.2, 2.5, 4, 0.28, 0.31, 0.36, rotY + Math.PI * 0.25);
+  // Second-story school classroom windows
+  for (let i = -2; i <= 2; i += 1) {
+    const isLit = windowHash(x, z, i + 30) < 0.64;
+    if (isLit) {
+      const [er, eg, eb] = emissiveAmber(x, z, i + 30);
+      addEmissiveWindowQuad(ew, x, baseY, z, rotY, 7.58, 5.0, i * 4.8, 1.6, 1.3, '+x', er, eg, eb);
+      addEmissiveWindowQuad(ew, x, baseY, z, rotY, -7.58, 5.0, i * 4.8, 1.6, 1.3, '-x', er, eg, eb);
+    }
+  }
+}
+
+function addWaterTower(b, ew, cx, cz) {
+  const baseY = sampleMeshHeight(cx, cz);
+  const legCol = [0.42, 0.45, 0.49];
+  // Concrete footing pad
+  b.box(cx, baseY + 0.25, cz, 9.0, 0.5, 9.0, 0.48, 0.48, 0.46);
+  // Central riser pipe
+  addSmoothCylinder(b, cx, baseY + 0.4, cz, 0.65, 0.55, 13.8, 8, 0.46, 0.49, 0.52);
+
+  // 6 angled support legs from base radius 4.0m up to tank floor radius 3.1m at y = 13.8m
+  const legCount = 6;
+  const tankBotY = 13.8;
+  for (let i = 0; i < legCount; i += 1) {
+    const ang = (i / legCount) * Math.PI * 2 + 0.2;
+    const ca = Math.cos(ang);
+    const sa = Math.sin(ang);
+    const lx0 = cx + ca * 3.9;
+    const lz0 = cz + sa * 3.9;
+    const lx1 = cx + ca * 3.0;
+    const lz1 = cz + sa * 3.0;
+    // Two-segment angled leg approximation via slender tilted columns + horizontal collar
+    b.box((lx0 + lx1) * 0.5, baseY + tankBotY * 0.5, (lz0 + lz1) * 0.5, 0.52, tankBotY + 0.4, 0.52, ...legCol, -ang);
+    b.box(lx0, baseY + 0.8, lz0, 0.85, 1.6, 0.85, 0.44, 0.44, 0.43);
+  }
+  // Horizontal brace collars at mid-height & tank base
+  addSmoothCylinder(b, cx, baseY + 6.8, cz, 3.55, 3.55, 0.35, 6, 0.38, 0.41, 0.45);
+  addSmoothCylinder(b, cx, baseY + tankBotY - 0.35, cz, 4.35, 4.35, 0.48, 12, 0.45, 0.47, 0.50);
+
+  // Cylindrical water tank (y: 13.8..20.2m) + accent band + cone roof (to ~23.5m)
+  addSmoothCylinder(b, cx, baseY + tankBotY, cz, 3.9, 3.9, 6.4, 14, 0.78, 0.80, 0.76, 1.03);
+  addSmoothCylinder(b, cx, baseY + tankBotY + 2.4, cz, 3.96, 3.96, 1.05, 14, 0.34, 0.44, 0.52, 1.0);
+  addSmoothCone(b, cx, baseY + tankBotY + 6.4, cz, 3.3, 4.25, 14, 0.30, 0.35, 0.41);
+
+  // Small red aircraft warning beacon on spire tip
+  addEmissiveWindowQuad(ew, cx, baseY, cz, 0, 0, tankBotY + 9.9, 0.25, 0.65, 0.65, '+z', 1.25, 0.28, 0.16);
+  addEmissiveWindowQuad(ew, cx, baseY, cz, 0, 0, tankBotY + 9.9, -0.25, 0.65, 0.65, '-z', 1.25, 0.28, 0.16);
+}
+
+function addMultiStoryBuilding(b, ew, spec, litProb = 0.64) {
+  const { x, z, rotY, w, d, floors, floorH = 3.4, wall, roof } = spec;
+  const wallH = floors * floorH;
+  const baseY = sampleMeshHeight(x, z);
+  const hw = w * 0.5;
+  const hd = d * 0.5;
+
+  // Main multi-story mass sunk 1.4m into terrain
+  b.box(x, baseY + (wallH - 1.4) * 0.5, z, w, wallH + 1.4, d, wall[0], wall[1], wall[2], rotY);
+  // Subtle horizontal cornice & rooftop parapet + tar roof deck + penthouse/HVAC
+  b.box(x, baseY + wallH + 0.35, z, w + 0.6, 0.7, d + 0.6, wall[0] * 0.84, wall[1] * 0.84, wall[2] * 0.84, rotY);
+  b.box(x, baseY + wallH + 0.72, z, w - 0.8, 0.18, d - 0.8, roof[0], roof[1], roof[2], rotY);
+  b.box(x - hw * 0.25, baseY + wallH + 1.35, z + hd * 0.2, w * 0.28, 1.2, d * 0.28, 0.44, 0.45, 0.48, rotY);
+
+  const c = Math.cos(rotY);
+  const s = Math.sin(rotY);
+  const pt = (lx, wy, lz) => [x + lx * c + lz * s, wy, z - lx * s + lz * c];
+
+  const colsX = Math.max(3, Math.floor((w - 2.0) / 4.2));
+  const colsZ = Math.max(3, Math.floor((d - 2.0) / 4.2));
+  let winIdx = 0;
+
+  for (let fl = 0; fl < floors; fl += 1) {
+    const wy = fl * floorH + floorH * 0.54;
+    // Front (+Z) and Back (-Z) facades
+    for (let ix = 0; ix < colsX; ix += 1) {
+      const lx = -hw + 2.2 + (colsX > 1 ? (ix / (colsX - 1)) * (w - 4.4) : (w - 4.4) * 0.5);
+      for (const [lz, dir] of [[hd + 0.08, '+z'], [-hd - 0.08, '-z']]) {
+        const isLit = windowHash(x + fl, z + ix, winIdx) < litProb;
+        if (isLit) {
+          const [er, eg, eb] = emissiveAmber(x + fl, z + ix, winIdx);
+          addEmissiveWindowQuad(ew, x, baseY, z, rotY, lx, wy, lz, 1.75, 1.45, dir, er, eg, eb);
+        } else {
+          const [wx, , wz] = pt(lx, 0, lz);
+          b.box(wx, baseY + wy, wz, 1.75, 1.45, 0.12, 0.18, 0.23, 0.29, rotY);
+        }
+        winIdx += 1;
+      }
+    }
+    // Right (+X) and Left (-X) facades
+    for (let iz = 0; iz < colsZ; iz += 1) {
+      const lz = -hd + 2.2 + (colsZ > 1 ? (iz / (colsZ - 1)) * (d - 4.4) : (d - 4.4) * 0.5);
+      for (const [lx, dir] of [[hw + 0.08, '+x'], [-hw - 0.08, '-x']]) {
+        const isLit = windowHash(x + iz, z + fl, winIdx) < litProb;
+        if (isLit) {
+          const [er, eg, eb] = emissiveAmber(x + iz, z + fl, winIdx);
+          addEmissiveWindowQuad(ew, x, baseY, z, rotY, lx, wy, lz, 1.75, 1.45, dir, er, eg, eb);
+        } else {
+          const [wx, , wz] = pt(lx, 0, lz);
+          b.box(wx, baseY + wy, wz, 0.12, 1.45, 1.75, 0.18, 0.23, 0.29, rotY);
+        }
+        winIdx += 1;
+      }
+    }
+  }
 }
 
 function buildTownHousesList() {
@@ -1641,12 +2041,12 @@ function buildTownHousesList() {
     [0.46, 0.28, 0.21],
     [0.32, 0.34, 0.39],
   ];
-  // 4x3 street grid blocks around TOWN_CENTER (1380, 1220)
+
+  // Original 44-house core block (kept first so tree exclusion stays identical)
   const cols = [-190, -105, -20, 65, 150];
   const rows = [-165, -75, 15, 105, 195];
   for (let r = 0; r < rows.length; r += 1) {
     for (let c = 0; c < cols.length; c += 1) {
-      // Reserve center square for Church + School
       if (c === 2 && (r === 1 || r === 2)) continue;
       for (let lot = 0; lot < 2; lot += 1) {
         if (houses.length >= 44) break;
@@ -1673,36 +2073,195 @@ function buildTownHousesList() {
       }
     }
   }
+
+  // Expanded Oakwood infill + outer grid blocks + 2 angled/curved side streets (~80 more houses -> ~124 total)
+  const expCols = [-245, -175, -105, -30, 45, 120, 195];
+  const expRows = [-230, -160, -90, -12, 62, 138, 212];
+  const isNearExistingOrCivic = (hx, hz) => {
+    if (Math.hypot(hx - (TOWN_CENTER.x - 16), hz - (TOWN_CENTER.z - 68)) < 28) return true;
+    if (Math.hypot(hx - (TOWN_CENTER.x + 18), hz - (TOWN_CENTER.z + 24)) < 32) return true;
+    // Clear of multi-story civic buildings & main street
+    if (Math.abs(hz - (TOWN_CENTER.z + 25)) < 15) return true;
+    for (const ms of [
+      [-48, 62], [54, -20], [-105, -18], [116, 60], [255, -195],
+    ]) {
+      if (Math.hypot(hx - (TOWN_CENTER.x + ms[0]), hz - (TOWN_CENTER.z + ms[1])) < 24) return true;
+    }
+    for (let i = 0; i < houses.length; i += 1) {
+      if (Math.hypot(hx - houses[i].x, hz - houses[i].z) < 20) return true;
+    }
+    return false;
+  };
+
+  for (let r = 0; r < expRows.length; r += 1) {
+    for (let c = 0; c < expCols.length; c += 1) {
+      for (let lot = 0; lot < 3; lot += 1) {
+        if (houses.length >= 114) break;
+        const ox = lot === 0 ? -16 : lot === 1 ? 16 : 0;
+        const oz = lot === 2 ? 16 : -12;
+        const hx = TOWN_CENTER.x + expCols[c] + ox + (rand() - 0.5) * 10;
+        const hz = TOWN_CENTER.z + expRows[r] + oz + (rand() - 0.5) * 10;
+        if (isNearExistingOrCivic(hx, hz)) continue;
+        houses.push({
+          x: hx,
+          z: hz,
+          rotY: (lot % 2 === 0 ? 0 : Math.PI * 0.5) + (rand() - 0.5) * 0.25,
+          w: 8.2 + rand() * 3.2,
+          d: 10.0 + rand() * 3.8,
+          wallH: 4.3 + rand() * 1.5,
+          roofH: 2.7 + rand() * 1.1,
+          wall: wallPalette[Math.floor(rand() * wallPalette.length)],
+          roof: roofPalette[Math.floor(rand() * roofPalette.length)],
+        });
+      }
+    }
+  }
+
+  // Houses lining the 2 curved/angled side streets (NW crescent & SE crescent)
+  const crescentLots = [
+    [-255, -248, 0.58], [-212, -280, 0.42], [-162, -296, 0.26], [-108, -310, 0.14], [-48, -316, 0.08], [15, -318, 0.04],
+    [195, 255, -0.52], [248, 224, -0.82], [288, 178, -1.12], [308, 118, -1.42], [312, 55, -1.55], [305, -8, -1.68],
+  ];
+  for (let i = 0; i < crescentLots.length; i += 1) {
+    const [lx, lz, rot] = crescentLots[i];
+    const hx = TOWN_CENTER.x + lx;
+    const hz = TOWN_CENTER.z + lz;
+    if (isNearExistingOrCivic(hx, hz)) continue;
+    houses.push({
+      x: hx,
+      z: hz,
+      rotY: rot + (rand() - 0.5) * 0.14,
+      w: 8.6 + rand() * 2.6,
+      d: 10.8 + rand() * 3.2,
+      wallH: 4.5 + rand() * 1.3,
+      roofH: 2.9 + rand() * 1.0,
+      wall: wallPalette[Math.floor(rand() * wallPalette.length)],
+      roof: roofPalette[Math.floor(rand() * roofPalette.length)],
+    });
+  }
   return houses;
 }
 
 const TOWN_HOUSES = buildTownHousesList();
+const ORIGINAL_TOWN_HOUSES = TOWN_HOUSES.slice(0, 44);
 
-export function buildVillageMesh() {
-  const b = createBuilder();
-  for (let i = 0; i < VILLAGE_HOUSES.length; i += 1) {
-    addHouse(b, VILLAGE_HOUSES[i]);
+const TOWN_MULTI_STORY = [
+  { x: TOWN_CENTER.x - 48, z: TOWN_CENTER.z + 62, rotY: 0.02, w: 16.5, d: 21.0, floors: 4, floorH: 3.4, wall: [0.76, 0.69, 0.61], roof: [0.24, 0.26, 0.30] },
+  { x: TOWN_CENTER.x + 54, z: TOWN_CENTER.z - 20, rotY: 1.56, w: 18.0, d: 22.0, floors: 5, floorH: 3.35, wall: [0.78, 0.75, 0.70], roof: [0.25, 0.27, 0.31] },
+  { x: TOWN_CENTER.x - 105, z: TOWN_CENTER.z - 18, rotY: -0.04, w: 15.5, d: 19.0, floors: 3, floorH: 3.7, wall: [0.71, 0.50, 0.40], roof: [0.26, 0.28, 0.32] },
+  { x: TOWN_CENTER.x + 116, z: TOWN_CENTER.z + 60, rotY: 1.59, w: 16.5, d: 20.5, floors: 4, floorH: 3.5, wall: [0.73, 0.74, 0.68], roof: [0.24, 0.26, 0.30] },
+];
+
+// River Hamlet: 12 houses + 2 barns in (250..450, 2050..2350), >= 150m from river centerline
+const RIVER_HAMLET_HOUSES = [
+  { x: 342, z: 2178, rotY: 0.22, w: 9.0, d: 11.4, wallH: 4.6, roofH: 3.2, wall: [0.80, 0.76, 0.68], roof: [0.55, 0.28, 0.21] },
+  { x: 378, z: 2182, rotY: 1.64, w: 8.6, d: 10.8, wallH: 4.5, roofH: 3.0, wall: [0.76, 0.71, 0.62], roof: [0.28, 0.31, 0.36] },
+  { x: 416, z: 2188, rotY: -0.35, w: 9.4, d: 11.8, wallH: 4.7, roofH: 3.3, wall: [0.74, 0.75, 0.70], roof: [0.46, 0.28, 0.21] },
+  { x: 326, z: 2218, rotY: 1.48, w: 8.8, d: 11.0, wallH: 4.5, roofH: 3.1, wall: [0.79, 0.74, 0.66], roof: [0.54, 0.27, 0.20] },
+  { x: 364, z: 2224, rotY: -1.62, w: 9.2, d: 11.6, wallH: 4.8, roofH: 3.3, wall: [0.81, 0.77, 0.70], roof: [0.27, 0.30, 0.35] },
+  { x: 404, z: 2226, rotY: 0.14, w: 8.8, d: 10.6, wallH: 4.4, roofH: 3.0, wall: [0.77, 0.69, 0.60], roof: [0.56, 0.29, 0.22] },
+  { x: 438, z: 2236, rotY: 1.72, w: 9.6, d: 12.0, wallH: 4.8, roofH: 3.4, wall: [0.75, 0.72, 0.64], roof: [0.30, 0.33, 0.38] },
+  { x: 318, z: 2264, rotY: -0.22, w: 9.0, d: 11.2, wallH: 4.6, roofH: 3.2, wall: [0.78, 0.73, 0.65], roof: [0.45, 0.27, 0.20] },
+  { x: 358, z: 2268, rotY: 1.52, w: 8.8, d: 11.4, wallH: 4.5, roofH: 3.1, wall: [0.80, 0.76, 0.69], roof: [0.54, 0.28, 0.21] },
+  { x: 398, z: 2272, rotY: -1.48, w: 9.2, d: 11.8, wallH: 4.7, roofH: 3.3, wall: [0.73, 0.74, 0.69], roof: [0.28, 0.31, 0.36] },
+  { x: 332, z: 2308, rotY: 0.32, w: 9.4, d: 11.6, wallH: 4.7, roofH: 3.2, wall: [0.78, 0.71, 0.63], roof: [0.55, 0.29, 0.22] },
+  { x: 382, z: 2314, rotY: -1.68, w: 8.8, d: 10.8, wallH: 4.5, roofH: 3.1, wall: [0.76, 0.74, 0.66], roof: [0.46, 0.28, 0.21] },
+];
+const RIVER_HAMLET_BARNS = [
+  { x: 432, z: 2288, rotY: 0.18, w: 12.5, d: 18.0, wallH: 5.4, roofH: 4.0, wall: [0.58, 0.29, 0.22], roof: [0.27, 0.29, 0.34] },
+  { x: 298, z: 2292, rotY: 1.45, w: 12.0, d: 17.0, wallH: 5.2, roofH: 3.9, wall: [0.66, 0.58, 0.48], roof: [0.30, 0.32, 0.37] },
+];
+
+// Lake-shore village: 11 houses near northern lake's southern/western shore (-1250±200, -1950±200)
+const LAKE_VILLAGE_HOUSES = [
+  { x: -1272, z: -2028, rotY: 0.45, w: 9.0, d: 11.2, wallH: 4.5, roofH: 3.1, wall: [0.79, 0.75, 0.68], roof: [0.28, 0.31, 0.36] },
+  { x: -1228, z: -2022, rotY: 1.52, w: 8.6, d: 10.8, wallH: 4.4, roofH: 3.0, wall: [0.74, 0.75, 0.70], roof: [0.54, 0.28, 0.21] },
+  { x: -1178, z: -2016, rotY: -0.25, w: 9.2, d: 11.4, wallH: 4.6, roofH: 3.2, wall: [0.81, 0.77, 0.70], roof: [0.27, 0.30, 0.35] },
+  { x: -1282, z: -1984, rotY: 1.64, w: 8.8, d: 11.0, wallH: 4.5, roofH: 3.1, wall: [0.77, 0.71, 0.63], roof: [0.46, 0.28, 0.21] },
+  { x: -1236, z: -1978, rotY: -1.48, w: 9.4, d: 11.8, wallH: 4.7, roofH: 3.3, wall: [0.78, 0.74, 0.66], roof: [0.55, 0.28, 0.21] },
+  { x: -1188, z: -1972, rotY: 0.12, w: 9.0, d: 11.2, wallH: 4.6, roofH: 3.2, wall: [0.75, 0.72, 0.65], roof: [0.29, 0.32, 0.37] },
+  { x: -1146, z: -1968, rotY: 1.58, w: 8.6, d: 10.6, wallH: 4.4, roofH: 3.0, wall: [0.80, 0.76, 0.69], roof: [0.46, 0.27, 0.20] },
+  { x: -1266, z: -1936, rotY: -0.35, w: 9.0, d: 11.4, wallH: 4.6, roofH: 3.2, wall: [0.73, 0.74, 0.69], roof: [0.54, 0.27, 0.20] },
+  { x: -1218, z: -1928, rotY: 1.44, w: 9.2, d: 11.6, wallH: 4.7, roofH: 3.2, wall: [0.79, 0.73, 0.65], roof: [0.27, 0.30, 0.35] },
+  { x: -1168, z: -1920, rotY: -1.62, w: 8.8, d: 10.8, wallH: 4.5, roofH: 3.1, wall: [0.76, 0.69, 0.60], roof: [0.56, 0.29, 0.22] },
+  { x: -1212, z: -1886, rotY: 0.22, w: 9.6, d: 12.0, wallH: 4.8, roofH: 3.4, wall: [0.80, 0.76, 0.68], roof: [0.30, 0.33, 0.38] },
+];
+
+// Farmland hamlet: 7 farmhouses + 3 barns around (-700±200, 2550±250)
+const FARMLAND_HAMLET_HOUSES = [
+  { x: -756, z: 2486, rotY: 0.24, w: 9.4, d: 11.8, wallH: 4.7, roofH: 3.2, wall: [0.80, 0.76, 0.69], roof: [0.54, 0.28, 0.21] },
+  { x: -698, z: 2492, rotY: 1.62, w: 9.0, d: 11.4, wallH: 4.6, roofH: 3.1, wall: [0.77, 0.71, 0.63], roof: [0.27, 0.30, 0.35] },
+  { x: -636, z: 2504, rotY: -0.32, w: 9.2, d: 11.6, wallH: 4.7, roofH: 3.2, wall: [0.75, 0.75, 0.70], roof: [0.46, 0.28, 0.21] },
+  { x: -764, z: 2548, rotY: 1.50, w: 8.8, d: 11.0, wallH: 4.5, roofH: 3.1, wall: [0.79, 0.74, 0.66], roof: [0.56, 0.29, 0.22] },
+  { x: -708, z: 2556, rotY: -1.58, w: 9.6, d: 12.2, wallH: 4.8, roofH: 3.4, wall: [0.81, 0.77, 0.70], roof: [0.28, 0.31, 0.36] },
+  { x: -644, z: 2564, rotY: 0.16, w: 9.0, d: 11.2, wallH: 4.6, roofH: 3.2, wall: [0.76, 0.69, 0.61], roof: [0.54, 0.27, 0.20] },
+  { x: -726, z: 2612, rotY: 0.42, w: 9.2, d: 11.6, wallH: 4.7, roofH: 3.2, wall: [0.78, 0.73, 0.65], roof: [0.30, 0.33, 0.38] },
+];
+const FARMLAND_HAMLET_BARNS = [
+  { x: -648, z: 2618, rotY: 0.14, w: 13.0, d: 18.5, wallH: 5.5, roofH: 4.1, wall: [0.58, 0.29, 0.22], roof: [0.26, 0.28, 0.33] },
+  { x: -778, z: 2598, rotY: 1.55, w: 12.2, d: 17.5, wallH: 5.3, roofH: 3.9, wall: [0.68, 0.62, 0.52], roof: [0.45, 0.27, 0.21] },
+  { x: -616, z: 2542, rotY: -0.22, w: 12.5, d: 17.5, wallH: 5.4, roofH: 4.0, wall: [0.56, 0.30, 0.23], roof: [0.28, 0.30, 0.35] },
+];
+
+// 6 scattered lone farmsteads (house + barn + cylindrical silo with dome cap)
+const LONE_FARMSTEADS = [
+  { x: -435, z: 620, rotY: 0.28 },
+  { x: 575, z: 560, rotY: -0.42 },
+  { x: -550, z: 1360, rotY: 0.15 },
+  { x: 675, z: 1620, rotY: 1.42 },
+  { x: -290, z: 1880, rotY: -0.30 },
+  { x: 245, z: 2860, rotY: 0.52 },
+];
+
+function addWoodenJetty(b, ew, startX, endX, z) {
+  const len = Math.abs(endX - startX);
+  const midX = (startX + endX) * 0.5;
+  const deckY = WORLD.waterY + 0.85;
+  // Planked deck & side stringers
+  b.box(midX, deckY, z, len, 0.22, 3.2, 0.46, 0.33, 0.22);
+  b.box(midX, deckY + 0.14, z - 1.5, len, 0.14, 0.22, 0.38, 0.27, 0.18);
+  b.box(midX, deckY + 0.14, z + 1.5, len, 0.14, 0.22, 0.38, 0.27, 0.18);
+  // Timber pilings sunk into lake bed
+  const steps = Math.floor(len / 9);
+  for (let i = 0; i <= steps; i += 1) {
+    const px = lerp(startX, endX, i / steps);
+    for (const pz of [z - 1.35, z + 1.35]) {
+      b.box(px, deckY - 1.8, pz, 0.34, 4.4, 0.34, 0.32, 0.22, 0.14);
+    }
   }
-  // Oakwood Town (SE of airfield): street grid, 44 pitched-roof houses, church & school
-  const streetX = [-225, -140, -55, 30, 115, 195];
-  const streetZ = [-205, -115, -25, 65, 150, 235];
+  // Small mooring lantern post at jetty tip
+  b.box(endX - 0.5, deckY + 1.1, z + 1.3, 0.18, 2.0, 0.18, 0.26, 0.20, 0.14);
+  addEmissiveWindowQuad(ew, endX - 0.5, deckY, z + 1.3, 0, 0, 2.15, 0.26, 0.45, 0.45, '+z', 1.05, 0.66, 0.28);
+  addEmissiveWindowQuad(ew, endX - 0.5, deckY, z + 1.3, 0, 0, 2.15, -0.26, 0.45, 0.45, '-z', 1.05, 0.66, 0.28);
+}
+
+function populateSettlements(b, ew) {
+  for (let i = 0; i < VILLAGE_HOUSES.length; i += 1) {
+    addHouse(b, VILLAGE_HOUSES[i], ew, 0.42);
+  }
+
+  // Oakwood Town (SE of airfield): denser street grid + 2 curved side streets, ~124 houses,
+  // raised clock-tower church, school, water tower, 4 multi-story buildings & main-street lights
+  const streetX = [-280, -210, -140, -65, 10, 85, 160, 235];
+  const streetZ = [-265, -195, -125, -50, 25, 100, 175, 250];
   for (let i = 0; i < streetZ.length; i += 1) {
     const gz = TOWN_CENTER.z + streetZ[i];
+    const isMain = streetZ[i] === 25;
     addRoadRibbon(
       b,
-      [{ x: TOWN_CENTER.x - 245, z: gz }, { x: TOWN_CENTER.x, z: gz }, { x: TOWN_CENTER.x + 225, z: gz }],
-      3.4,
-      1.0,
-      0.28,
-      0.27,
-      0.26,
+      [{ x: TOWN_CENTER.x - 300, z: gz }, { x: TOWN_CENTER.x, z: gz }, { x: TOWN_CENTER.x + 275, z: gz }],
+      isMain ? 4.6 : 3.4,
+      isMain ? 1.2 : 1.0,
+      isMain ? 0.24 : 0.28,
+      isMain ? 0.24 : 0.27,
+      isMain ? 0.25 : 0.26,
     );
   }
   for (let i = 0; i < streetX.length; i += 1) {
     const gx = TOWN_CENTER.x + streetX[i];
     addRoadRibbon(
       b,
-      [{ x: gx, z: TOWN_CENTER.z - 220 }, { x: gx, z: TOWN_CENTER.z }, { x: gx, z: TOWN_CENTER.z + 250 }],
+      [{ x: gx, z: TOWN_CENTER.z - 285 }, { x: gx, z: TOWN_CENTER.z }, { x: gx, z: TOWN_CENTER.z + 275 }],
       3.4,
       1.0,
       0.28,
@@ -1710,12 +2269,155 @@ export function buildVillageMesh() {
       0.26,
     );
   }
+
+  // 2 curved/angled side streets (NW crescent + SE crescent)
+  const nwStreet = sampleCatmullRom([
+    { x: TOWN_CENTER.x - 280, z: TOWN_CENTER.z - 195 },
+    { x: TOWN_CENTER.x - 210, z: TOWN_CENTER.z - 255 },
+    { x: TOWN_CENTER.x - 110, z: TOWN_CENTER.z - 288 },
+    { x: TOWN_CENTER.x + 25, z: TOWN_CENTER.z - 298 },
+  ], 14);
+  const seStreet = sampleCatmullRom([
+    { x: TOWN_CENTER.x + 160, z: TOWN_CENTER.z + 250 },
+    { x: TOWN_CENTER.x + 245, z: TOWN_CENTER.z + 205 },
+    { x: TOWN_CENTER.x + 288, z: TOWN_CENTER.z + 110 },
+    { x: TOWN_CENTER.x + 285, z: TOWN_CENTER.z - 20 },
+  ], 14);
+  addRoadRibbon(b, nwStreet, 3.1, 0.9, 0.29, 0.28, 0.26);
+  addRoadRibbon(b, seStreet, 3.1, 0.9, 0.29, 0.28, 0.26);
+
   for (let i = 0; i < TOWN_HOUSES.length; i += 1) {
-    addHouse(b, TOWN_HOUSES[i]);
+    addHouse(b, TOWN_HOUSES[i], ew, 0.62);
   }
-  addTownChurch(b, TOWN_CENTER.x - 16, TOWN_CENTER.z - 68, 0.08);
-  addTownSchool(b, TOWN_CENTER.x + 18, TOWN_CENTER.z + 24, 1.57);
+  addTownChurch(b, ew, TOWN_CENTER.x - 16, TOWN_CENTER.z - 68, 0.08);
+  addTownSchool(b, ew, TOWN_CENTER.x + 18, TOWN_CENTER.z + 24, 1.57);
+  addWaterTower(b, ew, TOWN_CENTER.x + 255, TOWN_CENTER.z - 195);
+  for (let i = 0; i < TOWN_MULTI_STORY.length; i += 1) {
+    addMultiStoryBuilding(b, ew, TOWN_MULTI_STORY[i], 0.64);
+  }
+
+  // Main-street street lights every ~35m along z = TOWN_CENTER.z + 25
+  const mainZ = TOWN_CENTER.z + 25;
+  for (let i = 0; i < 16; i += 1) {
+    const lx = TOWN_CENTER.x - 275 + i * 35;
+    const side = i % 2 === 0 ? -1 : 1;
+    const lz = mainZ + side * 6.0;
+    const ly = sampleMeshHeight(lx, lz);
+    b.box(lx, ly + 2.6, lz, 0.22, 5.2, 0.22, 0.22, 0.24, 0.27);
+    b.box(lx, ly + 5.15, lz - side * 0.45, 0.20, 0.18, 1.0, 0.22, 0.24, 0.27);
+    const lHeadZ = lz - side * 0.88;
+    const lHeadY = 5.02;
+    addEmissiveWindowQuad(ew, lx, ly, lHeadZ, 0, 0, lHeadY, 0.42, 0.85, 0.65, '+z', 1.15, 0.74, 0.34);
+    addEmissiveWindowQuad(ew, lx, ly, lHeadZ, 0, 0, lHeadY, -0.42, 0.85, 0.65, '-z', 1.15, 0.74, 0.34);
+    addEmissiveWindowQuad(ew, lx, ly, lHeadZ, 0, 0.42, lHeadY, 0, 0.85, 0.65, '+x', 1.15, 0.74, 0.34);
+    addEmissiveWindowQuad(ew, lx, ly, lHeadZ, 0, -0.42, lHeadY, 0, 0.85, 0.65, '-x', 1.15, 0.74, 0.34);
+  }
+
+  // Settlement 1: River Hamlet
+  addRoadRibbon(
+    b,
+    [{ x: 300, z: 2202 }, { x: 375, z: 2206 }, { x: 446, z: 2212 }],
+    2.6,
+    0.8,
+    0.34,
+    0.32,
+    0.29,
+  );
+  addRoadRibbon(
+    b,
+    [{ x: 315, z: 2288 }, { x: 380, z: 2292 }, { x: 438, z: 2294 }],
+    2.6,
+    0.8,
+    0.34,
+    0.32,
+    0.29,
+  );
+  for (let i = 0; i < RIVER_HAMLET_HOUSES.length; i += 1) {
+    addHouse(b, RIVER_HAMLET_HOUSES[i], ew, 0.40);
+  }
+  for (let i = 0; i < RIVER_HAMLET_BARNS.length; i += 1) {
+    addBarn(b, ew, RIVER_HAMLET_BARNS[i], 0.40);
+  }
+
+  // Settlement 2: Lake-shore Village + wooden jetty
+  addRoadRibbon(
+    b,
+    [{ x: -1290, z: -1956 }, { x: -1215, z: -1952 }, { x: -1135, z: -1958 }],
+    2.5,
+    0.8,
+    0.34,
+    0.32,
+    0.29,
+  );
+  for (let i = 0; i < LAKE_VILLAGE_HOUSES.length; i += 1) {
+    addHouse(b, LAKE_VILLAGE_HOUSES[i], ew, 0.42);
+  }
+  addWoodenJetty(b, ew, -1125, -1042, -1962);
+
+  // Settlement 3: Farmland Hamlet
+  addRoadRibbon(
+    b,
+    [{ x: -785, z: 2524 }, { x: -700, z: 2528 }, { x: -618, z: 2530 }],
+    2.6,
+    0.8,
+    0.35,
+    0.33,
+    0.29,
+  );
+  for (let i = 0; i < FARMLAND_HAMLET_HOUSES.length; i += 1) {
+    addHouse(b, FARMLAND_HAMLET_HOUSES[i], ew, 0.40);
+  }
+  for (let i = 0; i < FARMLAND_HAMLET_BARNS.length; i += 1) {
+    addBarn(b, ew, FARMLAND_HAMLET_BARNS[i], 0.40);
+  }
+  addSilo(b, -660, 2610, 2.5, 11.2);
+
+  // 6 Scattered Lone Farmsteads (house + barn + cylindrical silo with dome cap)
+  for (let i = 0; i < LONE_FARMSTEADS.length; i += 1) {
+    const f = LONE_FARMSTEADS[i];
+    const c = Math.cos(f.rotY);
+    const s = Math.sin(f.rotY);
+    addHouse(b, {
+      x: f.x,
+      z: f.z,
+      rotY: f.rotY,
+      w: 9.4,
+      d: 11.8,
+      wallH: 4.7,
+      roofH: 3.3,
+      wall: [0.80, 0.76, 0.68],
+      roof: i % 2 === 0 ? [0.54, 0.28, 0.21] : [0.28, 0.31, 0.36],
+    }, ew, 0.42);
+    const bx = f.x + 22 * c - 6 * s;
+    const bz = f.z - 22 * s - 6 * c;
+    addBarn(b, ew, {
+      x: bx,
+      z: bz,
+      rotY: f.rotY + 1.57,
+      w: 12.2,
+      d: 17.5,
+      wallH: 5.4,
+      roofH: 4.0,
+      wall: [0.58, 0.29, 0.22],
+      roof: [0.27, 0.29, 0.34],
+    }, 0.38);
+    const sx = bx + 10.5 * c + 5 * s;
+    const sz = bz - 10.5 * s + 5 * c;
+    addSilo(b, sx, sz, 2.45, 11.4);
+  }
+}
+
+export function buildVillageMesh() {
+  const b = createBuilder();
+  populateSettlements(b, NOOP_BUILDER);
   return b.toMesh();
+}
+
+export function buildEmissiveMesh() {
+  const ew = createBuilder();
+  populateAirfield(NOOP_BUILDER, ew);
+  populateSettlements(NOOP_BUILDER, ew);
+  return ew.toMesh();
 }
 
 // --- Smooth-Shaded Trees (3 Types) & Field-Edge Hedgerows ---
@@ -1880,10 +2582,10 @@ function isTreeForbidden(x, z) {
   if (z > -1850 && Math.abs(x - riverCenterX(z)) < riverHalfWidth(z) + 26) return true;
   // Village roads & farm tracks
   if (isNearRoad(x, z, 9.5)) return true;
-  // Town street grid
+  // Town street grid (uses original 44 houses so tree mesh vertex count remains invariant)
   if (Math.abs(x - TOWN_CENTER.x) < 250 && Math.abs(z - TOWN_CENTER.z) < 255) {
-    for (let i = 0; i < TOWN_HOUSES.length; i += 1) {
-      const th = TOWN_HOUSES[i];
+    for (let i = 0; i < ORIGINAL_TOWN_HOUSES.length; i += 1) {
+      const th = ORIGINAL_TOWN_HOUSES[i];
       if (Math.hypot(x - th.x, z - th.z) < 15) return true;
     }
     if (Math.hypot(x - (TOWN_CENTER.x - 16), z - (TOWN_CENTER.z - 68)) < 24) return true;
