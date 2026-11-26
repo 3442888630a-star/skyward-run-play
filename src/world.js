@@ -65,6 +65,11 @@ export function createWorld() {
     lowFuelAlerted: false,
     fuelOutAlerted: false,
     stallCooldown: 0,
+    wingTrail: [],
+    lastTrailTime: -10,
+    ringBursts: [],
+    dustPuffs: [],
+    lastDustTime: -10,
   };
 
   const tmpA = vec3();
@@ -154,6 +159,11 @@ export function createWorld() {
     state.lowFuelAlerted = false;
     state.fuelOutAlerted = false;
     state.stallCooldown = 0;
+    state.wingTrail.length = 0;
+    state.lastTrailTime = -10;
+    state.ringBursts.length = 0;
+    state.dustPuffs.length = 0;
+    state.lastDustTime = -10;
   }
 
   function setToast(msg, seconds = 2.6) {
@@ -186,6 +196,13 @@ export function createWorld() {
       const pts = Math.round(SCORING.ringBase + SCORING.ringCenterBonus * centerFactor);
       state.ringScore += pts;
       state.ringsPassed += 1;
+      state.ringBursts.push({
+        x: ring.x,
+        y: ring.y,
+        z: ring.z,
+        heading: ring.heading,
+        t: state.elapsed,
+      });
       if (state.ringsPassed < MISSION_RINGS.length) {
         setToast(`Ring ${state.ringsPassed}/8 Cleared (+${pts}) — Next: ${MISSION_RINGS[state.ringsPassed].label}`, 2.6);
       } else {
@@ -261,6 +278,95 @@ export function createWorld() {
     extractAttitude();
   }
 
+  function spawnDustPuff(x, y, z, vx, vy, vz, size, life) {
+    state.dustPuffs.push({ x, y, z, vx, vy, vz, size, life, t: state.elapsed });
+    if (state.dustPuffs.length > 72) state.dustPuffs.shift();
+  }
+
+  function emitTouchdownDust(sinkSpeed) {
+    const intensity = clamp(0.6 + sinkSpeed * 0.25, 0.6, 1.5);
+    for (const side of [-1, 1]) {
+      const wx = plane.pos.x + plane.right.x * (side * 1.16) + plane.forward.x * 0.20;
+      const wy = RUNWAY.elevation + 0.18;
+      const wz = plane.pos.z + plane.right.z * (side * 1.16) + plane.forward.z * 0.20;
+      for (let i = 0; i < 6; i += 1) {
+        const ang = (i / 6) * Math.PI * 2 + side * 0.5;
+        const spread = (1.6 + (i % 3) * 0.9) * intensity;
+        spawnDustPuff(
+          wx + Math.cos(ang) * 0.3,
+          wy,
+          wz + Math.sin(ang) * 0.3,
+          Math.cos(ang) * spread + plane.vel.x * 0.14,
+          (0.65 + (i % 2) * 0.45) * intensity,
+          Math.sin(ang) * spread + plane.vel.z * 0.14,
+          (1.1 + (i % 3) * 0.45) * intensity,
+          1.45,
+        );
+      }
+    }
+  }
+
+  function updateVfx(pitchCmd = 0) {
+    const t = state.elapsed;
+    // Prune expired bursts & dust puffs
+    while (state.ringBursts.length > 0 && t - state.ringBursts[0].t > 1.6) {
+      state.ringBursts.shift();
+    }
+    while (state.dustPuffs.length > 0 && t - state.dustPuffs[0].t > state.dustPuffs[0].life) {
+      state.dustPuffs.shift();
+    }
+
+    // Wingtip condensation trails when banking or pulling high G at speed
+    if (t - state.lastTrailTime >= 0.04) {
+      state.lastTrailTime = t;
+      const bankFactor = clamp((Math.abs(plane.roll) - 0.11) / 0.50, 0, 1);
+      const pitchFactor = clamp((Math.abs(pitchCmd) - 0.35) / 0.65, 0, 1);
+      const speedFactor = clamp((plane.speed - 25) / 24, 0, 1);
+      const intensity = !plane.onGround ? clamp(Math.max(bankFactor, pitchFactor * 0.7), 0, 1) * speedFactor : 0;
+
+      // Wingtip local coords in aircraft.js: x = ±5.22, y = 1.15, z = -0.58 -> +forward * 0.58
+      const baseX = plane.pos.x + plane.up.x * 1.15 + plane.forward.x * 0.58;
+      const baseY = plane.pos.y + plane.up.y * 1.15 + plane.forward.y * 0.58;
+      const baseZ = plane.pos.z + plane.up.z * 1.15 + plane.forward.z * 0.58;
+      const wx = plane.right.x * 5.22;
+      const wy = plane.right.y * 5.22;
+      const wz = plane.right.z * 5.22;
+
+      state.wingTrail.push({
+        lx: baseX - wx,
+        ly: baseY - wy,
+        lz: baseZ - wz,
+        rx: baseX + wx,
+        ry: baseY + wy,
+        rz: baseZ + wz,
+        t,
+        intensity,
+      });
+      if (state.wingTrail.length > 42) state.wingTrail.shift();
+    }
+    while (state.wingTrail.length > 0 && t - state.wingTrail[0].t > 1.45) {
+      state.wingTrail.shift();
+    }
+
+    // Subtle wheel dust wisps during fast rollout on runway
+    if (plane.onGround && plane.speed > 18 && t - state.lastDustTime >= 0.09) {
+      state.lastDustTime = t;
+      const side = Math.sin(t * 27) > 0 ? 1 : -1;
+      const wx = plane.pos.x + plane.right.x * (side * 1.16) - plane.forward.x * 0.25;
+      const wz = plane.pos.z + plane.right.z * (side * 1.16) - plane.forward.z * 0.25;
+      spawnDustPuff(
+        wx,
+        RUNWAY.elevation + 0.16,
+        wz,
+        plane.vel.x * 0.08 + Math.sin(t * 19) * 0.4,
+        0.55,
+        plane.vel.z * 0.08 + Math.cos(t * 23) * 0.4,
+        0.85,
+        1.05,
+      );
+    }
+  }
+
   /**
    * Advance one fixed simulation step.
    * `controls`: { pitch: -1..1, roll: -1..1, yaw: -1..1, throttleDelta: -1..1, brake: bool }
@@ -276,6 +382,7 @@ export function createWorld() {
     state.propPhase += dt * (10 + enginePower * 46 + plane.speed * 0.25);
 
     if (state.outcome !== OUTCOME_NONE) {
+      updateVfx(0);
       return events;
     }
 
@@ -291,6 +398,7 @@ export function createWorld() {
       plane.pos.z = 1480 - (t * 28) % 900;
       plane.speed = 40;
       plane.verticalSpeed = Math.cos(t * 0.22) * 1.7;
+      updateVfx(0);
       return events;
     }
 
@@ -346,6 +454,7 @@ export function createWorld() {
           if (isOnRunway(plane.pos.x, plane.pos.z) && (plane.speed < 14 || (plane.groundRollTime > 1.2 && plane.throttle < 0.25))) {
             finishMissionWin();
             events |= EVENT_WIN | EVENT_OVER;
+            updateVfx(0);
             return events;
           }
         }
@@ -355,20 +464,24 @@ export function createWorld() {
           if (plane.speed > 13) {
             triggerCrash('Runway Excursion', plane.fuel <= 0);
             events |= EVENT_CRASH | EVENT_OVER;
+            updateVfx(0);
             return events;
           }
           if (!isOnApron(plane.pos.x, plane.pos.z)) {
             triggerCrash('Off-Runway Landing', plane.fuel <= 0);
             events |= EVENT_CRASH | EVENT_OVER;
+            updateVfx(0);
             return events;
           }
         }
         if (plane.fuel <= 0 && plane.speed < 2 && state.mode === MODE_MISSION && state.ringsPassed < MISSION_RINGS.length) {
           triggerCrash('Out of Fuel before completing course', true);
           events |= EVENT_CRASH | EVENT_OVER;
+          updateVfx(0);
           return events;
         }
       }
+      updateVfx(0);
       return events;
     }
 
@@ -506,6 +619,7 @@ export function createWorld() {
                 ? 'SMOOTH'
                 : 'FIRM';
           setBasisFromHeadingPitchRoll(plane.heading, Math.max(0, plane.pitch), 0);
+          emitTouchdownDust(sinkSpeed);
           events |= EVENT_TOUCHDOWN;
           if (state.mode === MODE_MISSION && state.ringsPassed < MISSION_RINGS.length) {
             setToast(`Touchdown (${plane.landingGrade}) — Pass all 8 rings to complete mission!`, 3.5);
@@ -528,6 +642,7 @@ export function createWorld() {
       }
     }
 
+    updateVfx(controls.pitch);
     return events;
   }
 

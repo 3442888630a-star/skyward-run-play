@@ -301,7 +301,7 @@ export function buildPlaneMesh() {
   ];
 
   // Use fine angular stops so cheatline & window frames align cleanly
-  const radSteps = 32;
+  const radSteps = 40;
   const grid = [];
   for (let s = 0; s < stations.length; s += 1) {
     const row = [];
@@ -676,14 +676,14 @@ export function buildPlaneMesh() {
 
 /**
  * Separate propeller mesh centered at origin (mounted at local plane z = -3.28),
- * featuring a smooth spinner cone and sculpted twisted blades visible at low RPM.
+ * featuring a smooth spinner cone and sculpted smooth-shaded twisted blades visible at low RPM.
  */
 export function buildPropellerMesh() {
   const b = createPlaneBuilder();
 
   // Smooth spinner cone from backplate z = +0.14 out to rounded nose tip z = -0.34
   const rings = [];
-  const segs = 20;
+  const segs = 24;
   const stations = [
     { z: 0.14, r: 0.25 },
     { z: 0.06, r: 0.23 },
@@ -694,12 +694,20 @@ export function buildPropellerMesh() {
   ];
   for (let s = 0; s < stations.length; s += 1) {
     const st = stations[s];
+    const sPrev = stations[Math.max(0, s - 1)];
+    const sNext = stations[Math.min(stations.length - 1, s + 1)];
+    const dz = sNext.z - sPrev.z;
+    const dr = sNext.r - sPrev.r;
+    const slopeLen = Math.hypot(dz, dr) || 1;
+    // Outward normal in radial/Z plane (z decreases toward nose tip)
+    const nRad = -dz / slopeLen;
+    const nZ = dr / slopeLen;
     const row = [];
     for (let i = 0; i <= segs; i += 1) {
       const a = (i / segs) * Math.PI * 2;
       const ca = Math.cos(a);
       const sa = Math.sin(a);
-      row.push({ x: ca * st.r, y: sa * st.r, z: st.z, nx: ca * 0.7, ny: sa * 0.7, nz: -0.7 });
+      row.push({ x: ca * st.r, y: sa * st.r, z: st.z, nx: ca * nRad, ny: sa * nRad, nz: nZ });
     }
     rings.push(row);
   }
@@ -725,27 +733,41 @@ export function buildPropellerMesh() {
     );
   }
 
-  // Two sculpted twisted propeller blades
+  // Two sculpted smooth-shaded twisted airfoil propeller blades
   const bladeStations = [
-    { r: 0.18, w: 0.06, t: 0.035, twist: 0.55 },
-    { r: 0.45, w: 0.11, t: 0.025, twist: 0.42 },
-    { r: 0.78, w: 0.105, t: 0.018, twist: 0.28 },
-    { r: 1.04, w: 0.085, t: 0.014, twist: 0.18 },
-    { r: 1.16, w: 0.055, t: 0.010, twist: 0.14 },
+    { r: 0.18, w: 0.055, t: 0.032, twist: 0.56 },
+    { r: 0.42, w: 0.105, t: 0.024, twist: 0.43 },
+    { r: 0.74, w: 0.105, t: 0.017, twist: 0.29 },
+    { r: 1.02, w: 0.082, t: 0.013, twist: 0.19 },
+    { r: 1.15, w: 0.050, t: 0.009, twist: 0.14 },
   ];
+  const profSegs = 8;
   for (const sign of [-1, 1]) {
     const bRings = [];
     for (let s = 0; s < bladeStations.length; s += 1) {
       const bs = bladeStations[s];
       const ct = Math.cos(bs.twist);
       const st = Math.sin(bs.twist);
-      const pts = [
-        [sign * bs.r, bs.w * ct, bs.w * st * sign + bs.t],
-        [sign * bs.r, -bs.w * ct, -bs.w * st * sign + bs.t],
-        [sign * bs.r, -bs.w * ct, -bs.w * st * sign - bs.t],
-        [sign * bs.r, bs.w * ct, bs.w * st * sign - bs.t],
-      ];
-      bRings.push(pts);
+      const ring = [];
+      for (let k = 0; k < profSegs; k += 1) {
+        const ang = (k / profSegs) * Math.PI * 2;
+        const ly = Math.cos(ang) * bs.w;
+        const lz = Math.sin(ang) * bs.t;
+        const nyL = Math.cos(ang) / Math.max(bs.w, 0.01);
+        const nzL = Math.sin(ang) / Math.max(bs.t, 0.005);
+        const nyRot = nyL * ct - nzL * st * sign;
+        const nzRot = nyL * st * sign + nzL * ct;
+        const nLen = Math.hypot(nyRot, nzRot) || 1;
+        ring.push({
+          x: sign * bs.r,
+          y: ly * ct - lz * st * sign,
+          z: ly * st * sign + lz * ct,
+          nx: 0,
+          ny: nyRot / nLen,
+          nz: nzRot / nLen,
+        });
+      }
+      bRings.push(ring);
     }
     for (let s = 0; s < bRings.length - 1; s += 1) {
       const isTip = s === bRings.length - 2;
@@ -753,14 +775,19 @@ export function buildPropellerMesh() {
       const m = isTip ? MAT_PAINT : MAT_METAL;
       const r0 = bRings[s];
       const r1 = bRings[s + 1];
-      for (let k = 0; k < 4; k += 1) {
-        const kn = (k + 1) % 4;
-        if (sign > 0) b.quadFlat(...r0[k], ...r1[k], ...r1[kn], ...r0[kn], c, m);
-        else b.quadFlat(...r0[k], ...r0[kn], ...r1[kn], ...r1[k], c, m);
+      for (let k = 0; k < profSegs; k += 1) {
+        const kn = (k + 1) % profSegs;
+        if (sign > 0) b.quadSmooth(r0[k], r1[k], r1[kn], r0[kn], c, m);
+        else b.quadSmooth(r0[k], r0[kn], r1[kn], r1[k], c, m);
       }
     }
-    const tip = bRings[bRings.length - 1];
-    b.quadFlat(...tip[0], ...tip[1], ...tip[2], ...tip[3], [0.95, 0.78, 0.22], MAT_PAINT);
+    const tipRing = bRings[bRings.length - 1];
+    const tipCenter = { x: sign * 1.17, y: 0, z: 0, nx: sign, ny: 0, nz: 0 };
+    for (let k = 0; k < profSegs; k += 1) {
+      const kn = (k + 1) % profSegs;
+      if (sign > 0) b.triSmooth(tipCenter, tipRing[k], tipRing[kn], [0.95, 0.78, 0.22], MAT_PAINT);
+      else b.triSmooth(tipCenter, tipRing[kn], tipRing[k], [0.95, 0.78, 0.22], MAT_PAINT);
+    }
   }
 
   return b.toMesh();
@@ -768,19 +795,20 @@ export function buildPropellerMesh() {
 
 /**
  * Translucent motion-blurred propeller disc centered at origin (mounted with propeller).
- * Uses radial concentric alpha/tint falloff encoded in vertex colors & normals for the glow pass.
+ * Stores radial fade in uvs.x [0..1] so the renderer blends hub & outer edge seamlessly.
  */
 export function buildPropDiscMesh() {
   const pos = [];
   const norm = [];
   const col = [];
-  const segs = 36;
+  const uv = [];
+  const segs = 40;
   const rings = [
-    { r: 0.22, c: [0.22, 0.22, 0.24] },
-    { r: 0.56, c: [0.35, 0.34, 0.36] },
-    { r: 0.98, c: [0.30, 0.30, 0.32] },
-    { r: 1.08, c: [0.85, 0.70, 0.26] },
-    { r: 1.17, c: [0.12, 0.12, 0.14] },
+    { r: 0.22, a: 0.0, c: [0.22, 0.22, 0.24] },
+    { r: 0.42, a: 0.75, c: [0.34, 0.33, 0.36] },
+    { r: 0.96, a: 0.65, c: [0.30, 0.30, 0.32] },
+    { r: 1.07, a: 0.85, c: [0.88, 0.72, 0.26] },
+    { r: 1.18, a: 0.0, c: [0.16, 0.16, 0.18] },
   ];
 
   for (let s = 0; s < rings.length - 1; s += 1) {
@@ -789,9 +817,8 @@ export function buildPropDiscMesh() {
     for (let i = 0; i < segs; i += 1) {
       const a0 = (i / segs) * Math.PI * 2;
       const a1 = ((i + 1) / segs) * Math.PI * 2;
-      // Subtle 2-blade motion streak modulation around circumference
-      const streak0 = 0.65 + 0.35 * Math.cos(a0 * 2);
-      const streak1 = 0.65 + 0.35 * Math.cos(a1 * 2);
+      const streak0 = 0.62 + 0.38 * Math.cos(a0 * 2);
+      const streak1 = 0.62 + 0.38 * Math.cos(a1 * 2);
       const c00 = [r0.c[0] * streak0, r0.c[1] * streak0, r0.c[2] * streak0];
       const c01 = [r0.c[0] * streak1, r0.c[1] * streak1, r0.c[2] * streak1];
       const c10 = [r1.c[0] * streak0, r1.c[1] * streak0, r1.c[2] * streak0];
@@ -805,6 +832,14 @@ export function buildPropDiscMesh() {
       pos.push(...p00, ...p10, ...p11, ...p00, ...p11, ...p01);
       for (let k = 0; k < 6; k += 1) norm.push(0, 0, -1);
       col.push(...c00, ...c10, ...c11, ...c00, ...c11, ...c01);
+      uv.push(
+        r0.a * streak0, 0,
+        r1.a * streak0, 0,
+        r1.a * streak1, 0,
+        r0.a * streak0, 0,
+        r1.a * streak1, 0,
+        r0.a * streak1, 0,
+      );
     }
   }
 
@@ -812,6 +847,7 @@ export function buildPropDiscMesh() {
     positions: new Float32Array(pos),
     normals: new Float32Array(norm),
     colors: new Float32Array(col),
+    uvs: new Float32Array(uv),
     vertexCount: pos.length / 3,
   };
 }

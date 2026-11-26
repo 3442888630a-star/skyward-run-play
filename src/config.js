@@ -7,8 +7,8 @@ export const STEP = 1 / 60;
 
 /** World extent: terrain spans [-HALF, +HALF] in X and Z (in meters). */
 export const WORLD = {
-  size: 5200,
-  half: 2600,
+  size: 10400,
+  half: 5200,
   gridSteps: 130,
   waterY: 0,
   airfieldY: 14,
@@ -84,8 +84,8 @@ export const PLANE = {
   turnCoord: 0.58, // natural heading turn from bank angle
   rollRestore: 0.32, // gentle wing-leveling stability when roll input is 0
   fuelCapacity: 100,
-  fuelIdleDrain: 0.09, // % per second at 0% throttle
-  fuelMaxDrain: 0.56, // % per second at 100% throttle
+  fuelIdleDrain: 0.05, // % per second at 0% throttle
+  fuelMaxDrain: 0.33, // % per second at 100% throttle
   safeSinkSpeed: 4.8, // m/s vertical impact limit on runway
   firmSinkSpeed: 2.6,
   butterSinkSpeed: 1.15,
@@ -96,24 +96,25 @@ export const PLANE = {
 };
 
 /**
- * 8-ring mission course forming a scenic golden-hour loop around fields, river, hills,
- * lake coastline, and back onto final approach for Runway 36.
+ * 8-ring mission course forming a scenic golden-hour loop across all world zones:
+ * farmland, western mountains, wetland shore, northern lake, dense forest, town,
+ * river bend, and back onto final approach for Runway 36.
  */
 export const MISSION_RINGS = [
-  { x: 0, y: 155, z: 1020, heading: 0, label: 'Valley Gate' },
-  { x: 160, y: 170, z: 420, heading: 0.45, label: 'River Bend' },
-  { x: 560, y: 205, z: -220, heading: 0.35, label: 'Pine Ridge' },
-  { x: 640, y: 160, z: -960, heading: -0.75, label: 'Golden Lake' },
-  { x: -120, y: 145, z: -1280, heading: -1.65, label: 'North Shore' },
-  { x: -760, y: 185, z: -640, heading: -2.85, label: 'West Hills' },
-  { x: -560, y: 145, z: 460, heading: 2.35, label: 'Base Turn' },
+  { x: 0, y: 155, z: 1020, heading: 0, label: 'Farmland Plain' },
+  { x: -2100, y: 295, z: -250, heading: -0.65, label: 'West Crags' },
+  { x: -1150, y: 165, z: -2550, heading: 0.75, label: 'Wetland Shore' },
+  { x: 1150, y: 170, z: -2650, heading: 1.65, label: 'Mirror Lake' },
+  { x: 2450, y: 215, z: -750, heading: 2.75, label: 'Emerald Forest' },
+  { x: 1380, y: 175, z: 1220, heading: -2.65, label: 'Oakwood Town' },
+  { x: 420, y: 145, z: 1920, heading: -1.95, label: 'River Bend' },
   { x: 0, y: 92, z: 1080, heading: 0, label: 'Final 36' },
 ];
 
 export const SCORING = {
   ringBase: 250,
   ringCenterBonus: 150,
-  timeTarget: 135,
+  timeTarget: 330,
   timeBonusMax: 1000,
   fuelBonusPerPct: 12,
   landingButter: 1000,

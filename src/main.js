@@ -75,7 +75,9 @@ function runShot(name) {
     if (painted < 2) requestAnimationFrame(paint);
     else window.__shotReady = true;
   }
-  requestAnimationFrame(paint);
+  renderer3D.ready.then(() => {
+    requestAnimationFrame(paint);
+  });
 }
 
 function runGame() {
@@ -265,7 +267,10 @@ function runGame() {
   });
 
   announce('Skyward Run. Press Space or click Take Off to fly.');
-  requestAnimationFrame(frame);
+  renderer3D.ready.then(() => {
+    last = performance.now();
+    requestAnimationFrame(frame);
+  });
 }
 
 if (shot) runShot(shot);

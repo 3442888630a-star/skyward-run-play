@@ -31,19 +31,28 @@ export function stageShot(name, world) {
   const p = st.plane;
 
   if (name === 'play') {
-    // Mid-flight shot banking gracefully into glowing Ring 2 over the river & patchwork fields
-    const maxSteps = Math.round(32 / STEP);
-    for (let i = 0; i < maxSteps; i += 1) {
-      const target = st.ringsPassed < MISSION_RINGS.length ? MISSION_RINGS[st.ringsPassed] : { x: 0, y: 80, z: 320 };
-      world.step(STEP, autopilotTo(p, target, 45), false);
-      if (st.ringsPassed === 1) {
-        const r2 = MISSION_RINGS[1];
-        const dist = Math.hypot(p.pos.x - r2.x, p.pos.y - r2.y, p.pos.z - r2.z);
-        if (dist < 76) break;
-      }
+    // Mid-flight shot banking over Mirror Lake & Emerald Forest approaching Ring 5
+    st.ringsPassed = 4;
+    st.ringScore = 1380;
+    st.missionTime = 148.0;
+    p.fuel = 66;
+    p.pos.x = 1280;
+    p.pos.y = 185;
+    p.pos.z = -2420;
+    p.speed = 46;
+    p.throttle = 0.68;
+    world.setBasisFromHeadingPitchRoll(2.55, 0.02, 0.24);
+    p.vel.x = p.forward.x * p.speed;
+    p.vel.y = p.forward.y * p.speed;
+    p.vel.z = p.forward.z * p.speed;
+    p.verticalSpeed = p.vel.y;
+    for (let i = 0; i < Math.round(6.5 / STEP); i += 1) {
+      world.step(STEP, autopilotTo(p, MISSION_RINGS[4], 46), false);
+      const r5 = MISSION_RINGS[4];
+      if (Math.hypot(p.pos.x - r5.x, p.pos.y - r5.y, p.pos.z - r5.z) < 95) break;
     }
-    st.toastText = 'Ring 1 Cleared — Approaching River Bend';
-    st.toastTimer = 2.0;
+    st.toastText = 'Mirror Lake Cleared — Approaching Emerald Forest';
+    st.toastTimer = 2.4;
     return { screen: SCREEN_PLAY, best: st.ringScore };
   }
 
