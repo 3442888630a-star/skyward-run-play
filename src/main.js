@@ -7,6 +7,7 @@ import { createRenderer3D } from './render3d.js';
 import { createHudRenderer, SCREEN_HELP, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE } from './hud.js';
 import {
   ACTION_CAM,
+  ACTION_COCKPIT,
   ACTION_CONFIRM,
   ACTION_HELP,
   ACTION_MUTE,
@@ -70,6 +71,7 @@ function runShot(name) {
       muted: false,
       invertPitch: false,
       mouseYoke: false,
+      cam: renderer3D.getCamera(),
     });
     painted += 1;
     if (painted < 2) requestAnimationFrame(paint);
@@ -160,7 +162,20 @@ function runGame() {
       audio.toggleMute();
     }
     if (actions & ACTION_CAM) {
-      world.state.camMode = (world.state.camMode + 1) % 2;
+      if (world.state.camMode === 2) {
+        world.state.camMode = world.state.lastChaseMode || 0;
+      } else {
+        world.state.camMode = world.state.camMode === 1 ? 0 : 1;
+        world.state.lastChaseMode = world.state.camMode;
+      }
+    }
+    if (actions & ACTION_COCKPIT) {
+      if (world.state.camMode === 2) {
+        world.state.camMode = world.state.lastChaseMode || 0;
+      } else {
+        world.state.lastChaseMode = world.state.camMode;
+        world.state.camMode = 2;
+      }
     }
     if (actions & ACTION_HELP) {
       if (screen === SCREEN_HELP) {
@@ -199,8 +214,12 @@ function runGame() {
     }
     const events = world.step(STEP, input.flightControls(), false);
     if (events & EVENT_RING) {
-      audio.playRing(world.state.ringsPassed);
-      announce(`Ring ${world.state.ringsPassed} of 8 cleared.`);
+      audio.playRing(
+        world.state.ringsPassed,
+        world.state.comboMult,
+        world.state.lastRingGrade === 'PERFECT',
+      );
+      announce(`Ring ${world.state.ringsPassed} of 8 cleared (${world.state.lastRingGrade}).`);
     }
     if (events & EVENT_STALL) audio.playStall();
     if (events & EVENT_LOW_FUEL) audio.playLowFuel();
@@ -256,6 +275,7 @@ function runGame() {
       muted: audio.isMuted(),
       invertPitch: input.isInvertPitch(),
       mouseYoke: input.isMouseYoke(),
+      cam: renderer3D.getCamera(),
     });
   }
 
@@ -267,7 +287,10 @@ function runGame() {
   });
 
   announce('Skyward Run. Press Space or click Take Off to fly.');
-  renderer3D.ready.then(() => {
+  Promise.race([
+    renderer3D.ready,
+    new Promise((resolve) => setTimeout(resolve, 6000)),
+  ]).then(() => {
     last = performance.now();
     requestAnimationFrame(frame);
   });

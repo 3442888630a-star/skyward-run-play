@@ -2,8 +2,8 @@
 // Designed to stay razor-sharp over the WebGL1 3D scene with clickable hit regions.
 
 import { FIELD, FONT, MISSION_RINGS, MODE_FREE, MODE_MISSION, MONO_FONT, PALETTE, PLANE, RUNWAY, WORLD } from './config.js';
-import { clamp, wrapAngle } from './math.js';
-import { terrainHeight } from './terrain.js';
+import { clamp, dot3, normalize3, wrapAngle } from './math.js';
+import { terrainHeight, waterLevelAt } from './terrain.js';
 import { OUTCOME_FUEL, OUTCOME_WIN } from './world.js';
 
 export const SCREEN_TITLE = 'title';
@@ -277,7 +277,17 @@ export function createHudRenderer(canvas) {
       const done = state.ringsPassed;
       ctx.font = `700 13px ${MONO_FONT}`;
       ctx.fillStyle = PALETTE.hudAmber;
-      ctx.fillText(`MISSION  •  TIME ${formatClock(state.missionTime)}`, x + 15, y + 11);
+      ctx.fillText(`MISSION  •  ${formatClock(state.missionTime)}`, x + 15, y + 11);
+
+      // Combo multiplier badge on top right of mission card
+      const mult = state.comboMult || 1;
+      const streak = state.ringCombo || 0;
+      const comboCol = mult >= 3 ? PALETTE.hudGreen : mult >= 2 ? PALETTE.hudCyan : PALETTE.hudMuted;
+      ctx.font = `700 12px ${MONO_FONT}`;
+      ctx.fillStyle = comboCol;
+      ctx.textAlign = 'right';
+      ctx.fillText(streak > 0 ? `COMBO ×${mult} (${streak})` : 'COMBO ×1', x + w - 14, y + 12);
+      ctx.textAlign = 'left';
 
       // 8 ring pips
       for (let i = 0; i < MISSION_RINGS.length; i += 1) {
@@ -351,6 +361,8 @@ export function createHudRenderer(canvas) {
     const cy = FIELD.height - 88;
     const r = 68;
 
+    ctx.save();
+    ctx.globalAlpha = 0.45;
     drawPanelBox(cx - r - 9, cy - r - 9, (r + 9) * 2, (r + 9) * 2, r + 9);
 
     ctx.save();
@@ -481,6 +493,7 @@ export function createHudRenderer(canvas) {
     ctx.beginPath();
     ctx.arc(cx, cy, r - 1.5, 0, Math.PI * 2);
     ctx.stroke();
+    ctx.restore();
   }
 
   function drawLeftInstruments(state) {
@@ -613,7 +626,7 @@ export function createHudRenderer(canvas) {
   function drawRightInstruments(state) {
     const p = state.plane;
     const altFt = Math.round(p.pos.y * 3.28084);
-    const groundY = Math.max(WORLD.waterY, terrainHeight(p.pos.x, p.pos.z));
+    const groundY = Math.max(waterLevelAt(p.pos.x, p.pos.z), terrainHeight(p.pos.x, p.pos.z));
     const aglFt = Math.max(0, Math.round((p.pos.y - groundY) * 3.28084));
     const fpm = Math.round(p.verticalSpeed * 196.85);
 
@@ -700,29 +713,162 @@ export function createHudRenderer(canvas) {
     ctx.fillText(safeSink ? 'GLIDESLOPE OK' : p.onGround ? 'ON GROUND' : 'GREEN = LAND', vx + 13, vy + 104);
   }
 
-  function drawWarningsAndToast(state, targetPos) {
-    const cx = FIELD.width * 0.5;
-    // Off-axis directional indicator if target is > 28 deg off nose
-    if (targetPos && !state.plane.onGround) {
-      const dx = targetPos.x - state.plane.pos.x;
-      const dz = targetPos.z - state.plane.pos.z;
-      const brg = Math.atan2(dx, -dz);
-      const diff = wrapAngle(brg - state.plane.heading);
+  function drawSunGlare(cam) {
+    if (!cam || !cam.isCockpit) return;
+    const sunDir = normalize3({ x: PALETTE.sunDir[0], y: PALETTE.sunDir[1], z: PALETTE.sunDir[2] });
+    const sunDot = dot3(cam.forward, sunDir);
+    const cosLimit = 0.875; // ~29 deg outer onset, strong inside ~25 deg (0.906)
+    if (sunDot <= cosLimit) return;
+
+    const glare = clamp((sunDot - cosLimit) / (1.0 - cosLimit), 0, 1);
+    const tanY = Math.tan((cam.fovy || 1.0) * 0.5);
+    const tanX = tanY * (FIELD.width / FIELD.height);
+    const cx = dot3(sunDir, cam.right);
+    const cy = dot3(sunDir, cam.up);
+    const cz = Math.max(0.05, dot3(sunDir, cam.forward));
+    const sx = FIELD.width * 0.5 + (cx / (cz * tanX)) * (FIELD.width * 0.5);
+    const sy = FIELD.height * 0.5 - (cy / (cz * tanY)) * (FIELD.height * 0.5);
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    const glow = ctx.createRadialGradient(sx, sy, 12, sx, sy, 420);
+    glow.addColorStop(0.0, `rgba(255, 224, 155, ${0.28 * glare})`);
+    glow.addColorStop(0.32, `rgba(255, 178, 92, ${0.14 * glare})`);
+    glow.addColorStop(0.7, `rgba(240, 124, 58, ${0.05 * glare})`);
+    glow.addColorStop(1.0, 'rgba(240, 120, 50, 0)');
+    ctx.fillStyle = glow;
+    ctx.fillRect(0, 0, FIELD.width, FIELD.height);
+
+    // Subtle soft secondary lens-flare discs along optical axis (keeps gauges legible)
+    const ox = FIELD.width * 0.5;
+    const oy = FIELD.height * 0.5;
+    for (const [t, rad, col] of [
+      [-0.35, 42, `rgba(255, 195, 115, ${0.08 * glare})`],
+      [-0.68, 66, `rgba(255, 160, 95, ${0.06 * glare})`],
+    ]) {
+      const fx = ox + (sx - ox) * t;
+      const fy = oy + (sy - oy) * t;
+      const fg = ctx.createRadialGradient(fx, fy, 4, fx, fy, rad);
+      fg.addColorStop(0, col);
+      fg.addColorStop(1, 'rgba(255, 160, 95, 0)');
+      ctx.fillStyle = fg;
+      ctx.beginPath();
+      ctx.arc(fx, fy, rad, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawOffscreenEdgeArrow(state, targetPos, cam) {
+    if (!targetPos || state.plane.onGround) return;
+    const p = state.plane;
+    const tx = targetPos.x;
+    const ty = targetPos.y !== undefined ? targetPos.y : RUNWAY.elevation + 10;
+    const tz = targetPos.z;
+    const distM = Math.hypot(tx - p.pos.x, ty - p.pos.y, tz - p.pos.z);
+
+    let dirX = 0;
+    let dirY = 0;
+    let offscreen = false;
+
+    if (cam && cam.forward) {
+      const vx = tx - cam.pos.x;
+      const vy = ty - cam.pos.y;
+      const vz = tz - cam.pos.z;
+      const cx = vx * cam.right.x + vy * cam.right.y + vz * cam.right.z;
+      const cy = vx * cam.up.x + vy * cam.up.y + vz * cam.up.z;
+      const cz = vx * cam.forward.x + vy * cam.forward.y + vz * cam.forward.z;
+      const tanY = Math.tan((cam.fovy || 1.0) * 0.5);
+      const tanX = tanY * (FIELD.width / FIELD.height);
+      const nx = cz > 1e-3 ? cx / (cz * tanX) : cx >= 0 ? 2 : -2;
+      const ny = cz > 1e-3 ? -cy / (cz * tanY) : -cy >= 0 ? 2 : -2;
+      if (cz <= 0 || Math.abs(nx) > 0.90 || Math.abs(ny) > 0.84) {
+        offscreen = true;
+        dirX = cx / tanX;
+        dirY = -cy / tanY;
+      }
+    } else {
+      const brg = Math.atan2(tx - p.pos.x, -(tz - p.pos.z));
+      const diff = wrapAngle(brg - p.heading);
       if (Math.abs(diff) > 0.48) {
-        const side = diff > 0 ? 1 : -1;
-        const ax = cx + side * 410;
-        const ay = FIELD.height * 0.48;
-        drawPanelBox(ax - 54, ay - 20, 108, 40, 8, 'rgba(11,17,26,0.72)', PALETTE.hudCyan);
-        ctx.font = `700 14px ${MONO_FONT}`;
-        ctx.fillStyle = PALETTE.hudCyan;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(side > 0 ? 'TURN  ▶' : '◀  TURN', ax, ay);
+        offscreen = true;
+        dirX = diff > 0 ? 1 : -1;
+        dirY = 0;
       }
     }
 
+    if (!offscreen) return;
+    const len = Math.hypot(dirX, dirY) || 1;
+    dirX /= len;
+    dirY /= len;
+
+    const halfW = FIELD.width * 0.5 - 66;
+    const minY = 126;
+    const maxY = state.camMode === 2 ? FIELD.height - 96 : FIELD.height - 196;
+    const cyMid = (minY + maxY) * 0.5;
+    const halfH = (maxY - minY) * 0.5;
+    const txScale = Math.abs(dirX) > 1e-4 ? halfW / Math.abs(dirX) : 1e6;
+    const tyScale = Math.abs(dirY) > 1e-4 ? halfH / Math.abs(dirY) : 1e6;
+    const tEdge = Math.min(txScale, tyScale);
+    const ax = clamp(FIELD.width * 0.5 + dirX * tEdge, 66, FIELD.width - 66);
+    const ay = clamp(cyMid + dirY * tEdge, minY, maxY);
+
+    const isRwy = state.mode === MODE_FREE || state.ringsPassed >= MISSION_RINGS.length;
+    const col = isRwy ? PALETTE.hudGreen : PALETTE.hudCyan;
+    const distLabel = distM >= 1000 ? `${(distM / 1000).toFixed(1)}km` : `${Math.round(distM)}m`;
+
+    ctx.save();
+    drawPanelBox(ax - 44, ay - 22, 88, 44, 10, 'rgba(11, 17, 26, 0.80)', col);
+    // Directional arrow rotated toward target
+    const ang = Math.atan2(dirY, dirX);
+    ctx.save();
+    ctx.translate(ax - 22, ay);
+    ctx.rotate(ang);
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.moveTo(10, 0);
+    ctx.lineTo(-6, -7);
+    ctx.lineTo(-3, 0);
+    ctx.lineTo(-6, 7);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+
+    ctx.font = `700 13px ${MONO_FONT}`;
+    ctx.fillStyle = PALETTE.hudText;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(distLabel, ax + 12, ay + 1);
+    ctx.restore();
+  }
+
+  function drawWarningsAndToast(state, targetPos, cam) {
+    const cx = FIELD.width * 0.5;
+    drawOffscreenEdgeArrow(state, targetPos, cam);
+
+    // Center-screen PERFECT / GOOD / GRAZE / MISSED callout
+    if (state.calloutTimer > 0 && state.calloutText) {
+      const alpha = clamp(state.calloutTimer / 0.35, 0, 1);
+      const cy = FIELD.height * 0.28;
+      const col = state.calloutColor || PALETTE.hudAmber;
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      drawPanelBox(cx - 145, cy - 28, 290, 56, 12, 'rgba(11, 17, 26, 0.84)', col);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = `800 19px ${FONT}`;
+      ctx.fillStyle = col;
+      ctx.fillText(state.calloutText, cx, cy - 7);
+      if (state.calloutSub) {
+        ctx.font = `700 12.5px ${MONO_FONT}`;
+        ctx.fillStyle = PALETTE.hudText;
+        ctx.fillText(state.calloutSub, cx, cy + 14);
+      }
+      ctx.restore();
+    }
+
     // Critical warnings above artificial horizon
-    const warnY = FIELD.height - 196;
+    const warnY = state.camMode === 2 ? 130 : FIELD.height - 196;
     if (state.plane.isStalling && !state.plane.onGround) {
       drawPanelBox(cx - 110, warnY, 220, 28, 6, 'rgba(180, 28, 24, 0.88)', PALETTE.hudRed);
       ctx.font = `700 14px ${MONO_FONT}`;
@@ -783,107 +929,107 @@ export function createHudRenderer(canvas) {
 
   function drawTitleScreen(selectedMode, best, hoverId) {
     // Subtle left atmospheric scrim so glassy card pops without darkening the 3D scene
-    const scrim = ctx.createLinearGradient(0, 0, 680, 0);
-    scrim.addColorStop(0, 'rgba(7, 11, 20, 0.42)');
-    scrim.addColorStop(0.75, 'rgba(7, 11, 20, 0.14)');
+    const scrim = ctx.createLinearGradient(0, 0, 560, 0);
+    scrim.addColorStop(0, 'rgba(7, 11, 20, 0.36)');
+    scrim.addColorStop(0.75, 'rgba(7, 11, 20, 0.10)');
     scrim.addColorStop(1, 'rgba(7, 11, 20, 0)');
     ctx.fillStyle = scrim;
-    ctx.fillRect(0, 0, 680, FIELD.height);
+    ctx.fillRect(0, 0, 560, FIELD.height);
 
-    // Sleek left-aligned glass card leaving the propeller plane & golden valley glowing on the right
-    const x = 54;
-    const y = 72;
-    const w = 518;
-    const h = 576;
+    // Compact left-aligned glass card leaving the cockpit gauges, canyon & plane unobstructed
+    const x = 34;
+    const y = 30;
+    const w = 440;
+    const h = 426;
     const cardGrad = ctx.createLinearGradient(x, y, x, y + h);
     cardGrad.addColorStop(0, 'rgba(15, 23, 36, 0.78)');
     cardGrad.addColorStop(1, 'rgba(8, 13, 22, 0.86)');
-    drawPanelBox(x, y, w, h, 18, cardGrad, 'rgba(255, 204, 128, 0.36)', true);
+    drawPanelBox(x, y, w, h, 16, cardGrad, 'rgba(255, 204, 128, 0.36)', true);
 
     // Top golden accent hairline
     ctx.save();
-    const topBar = ctx.createLinearGradient(x + 32, y, x + w - 32, y);
+    const topBar = ctx.createLinearGradient(x + 28, y, x + w - 28, y);
     topBar.addColorStop(0, 'rgba(255, 190, 85, 0.85)');
     topBar.addColorStop(0.5, 'rgba(255, 224, 160, 0.55)');
     topBar.addColorStop(1, 'rgba(255, 190, 85, 0)');
     ctx.fillStyle = topBar;
-    ctx.fillRect(x + 32, y + 1, w - 64, 2);
+    ctx.fillRect(x + 28, y + 1, w - 56, 2);
     ctx.restore();
 
-    drawWingEmblem(x + 74, y + 38);
+    drawWingEmblem(x + 64, y + 28);
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    ctx.font = `700 13px ${MONO_FONT}`;
+    ctx.font = `700 11.5px ${MONO_FONT}`;
     ctx.fillStyle = PALETTE.hudAmber;
-    ctx.fillText('GOLDEN-HOUR FLIGHT CHALLENGE', x + 126, y + 39);
+    ctx.fillText('GOLDEN-HOUR FLIGHT CHALLENGE', x + 112, y + 29);
 
     ctx.textBaseline = 'top';
     ctx.save();
     ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
     ctx.shadowBlur = 12;
     ctx.shadowOffsetY = 3;
-    const titleGrad = ctx.createLinearGradient(x + 30, y + 60, x + 30, y + 122);
+    const titleGrad = ctx.createLinearGradient(x + 24, y + 46, x + 24, y + 96);
     titleGrad.addColorStop(0, '#fffdf7');
     titleGrad.addColorStop(1, '#f3d49c');
-    ctx.font = `800 54px ${FONT}`;
+    ctx.font = `800 44px ${FONT}`;
     ctx.fillStyle = titleGrad;
-    ctx.fillText('SKYWARD RUN', x + 30, y + 62);
+    ctx.fillText('SKYWARD RUN', x + 24, y + 46);
     ctx.restore();
 
-    ctx.font = `400 16px ${FONT}`;
+    ctx.font = `400 13.5px ${FONT}`;
     ctx.fillStyle = '#d8dee8';
-    ctx.fillText('Carve through golden valley skies, clear 8 glowing rings,', x + 32, y + 132);
-    ctx.fillText('manage your fuel, and touch down softly on Runway 36.', x + 32, y + 156);
+    ctx.fillText('Carve through alpine peaks & canyon walls, clear 8 rings,', x + 26, y + 100);
+    ctx.fillText('manage your fuel, and touch down softly on Runway 36.', x + 26, y + 119);
 
     // Mode selector cards
-    const m1Y = y + 204;
-    const m2Y = y + 300;
+    const m1Y = y + 150;
+    const m2Y = y + 220;
     drawModeCard(
       'mode-mission',
-      x + 32,
+      x + 24,
       m1Y,
-      w - 64,
-      82,
+      w - 48,
+      62,
       'MISSION MODE',
-      '8 Target Rings • Limited Fuel • Scored Runway 36 Landing',
+      '8 Target Rings • Wind & Fuel • Scored RWY 36 Landing',
       selectedMode === MODE_MISSION,
       hoverId,
     );
     drawModeCard(
       'mode-free',
-      x + 32,
+      x + 24,
       m2Y,
-      w - 64,
-      82,
+      w - 48,
+      62,
       'FREE FLIGHT',
-      'No Rings • Unlimited Fuel • Open Exploration & Landing Practice',
+      'No Rings • Unlimited Fuel • Open Exploration',
       selectedMode === MODE_FREE,
       hoverId,
     );
 
     // Primary Start CTA
-    drawButton('btn-start', x + 32, y + 404, w - 64, 54, 'TAKE OFF  (SPACE / ENTER)', true, hoverId, PALETTE.hudAmber, true);
+    drawButton('btn-start', x + 24, y + 296, w - 48, 44, 'TAKE OFF  (SPACE / ENTER)', true, hoverId, PALETTE.hudAmber, true);
 
     // Best score + secondary Help button
-    ctx.font = `700 14px ${MONO_FONT}`;
+    ctx.font = `700 12.5px ${MONO_FONT}`;
     ctx.fillStyle = PALETTE.hudCyan;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    ctx.fillText(`BEST MISSION SCORE: ${best}`, x + 34, y + 488);
-    drawButton('btn-help', x + w - 166, y + 470, 134, 36, '[H] CONTROLS', false, hoverId, PALETTE.hudCyan);
+    ctx.fillText(`BEST SCORE: ${best}`, x + 26, y + 364);
+    drawButton('btn-help', x + w - 152, y + 348, 128, 32, '[H] CONTROLS', false, hoverId, PALETTE.hudCyan);
 
     // Compact footer controls hint
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.10)';
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(x + 32, y + 524);
-    ctx.lineTo(x + w - 32, y + 524);
+    ctx.moveTo(x + 24, y + 392);
+    ctx.lineTo(x + w - 24, y + 392);
     ctx.stroke();
 
-    ctx.font = `500 12px ${MONO_FONT}`;
+    ctx.font = `500 11px ${MONO_FONT}`;
     ctx.fillStyle = PALETTE.hudMuted;
     ctx.textAlign = 'left';
-    ctx.fillText('W/S Pitch  •  A/D Roll  •  Q/E Yaw  •  Shift/X Throttle  •  Mouse Drag', x + 32, y + 544);
+    ctx.fillText('W/S Pitch • A/D Roll • Q/E Yaw • V Cockpit • Shift/X Thr', x + 24, y + 408);
   }
 
   function drawModeCard(id, x, y, w, h, title, desc, selected, hoverId) {
@@ -911,13 +1057,13 @@ export function createHudRenderer(canvas) {
 
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
-    ctx.font = `700 18px ${FONT}`;
+    ctx.font = `700 16px ${FONT}`;
     ctx.fillStyle = selected ? PALETTE.hudAmber : PALETTE.hudText;
-    ctx.fillText((selected ? '▸ ' : '  ') + title, x + 18, y + 16);
+    ctx.fillText((selected ? '▸ ' : '  ') + title, x + 16, y + 11);
 
-    ctx.font = `400 13.5px ${FONT}`;
+    ctx.font = `400 12.5px ${FONT}`;
     ctx.fillStyle = selected ? '#f2e8d5' : PALETTE.hudMuted;
-    ctx.fillText(desc, x + 18, y + 46);
+    ctx.fillText(desc, x + 16, y + 36);
   }
 
   function drawPauseModal(hoverId, invertPitch) {
@@ -972,21 +1118,22 @@ export function createHudRenderer(canvas) {
       ['Shift / R  &  X / F', 'Throttle Up / Down (or Mouse Wheel)'],
       ['B', 'Airbrake & Runway Wheel Brakes'],
       ['Mouse Drag  or  U', 'Virtual Yoke Steering (click-drag or toggle with U)'],
-      ['P / Esc  •  H  •  M  •  C', 'Pause • Help • Mute Audio • Chase Camera Distance'],
+      ['C  •  V', 'Chase Camera Distance  •  Toggle Cockpit View (First-Person)'],
+      ['P / Esc  •  H  •  M', 'Pause • Help • Mute Audio'],
     ];
 
     ctx.textAlign = 'left';
-    let ry = y + 86;
+    let ry = y + 80;
     for (const [key, desc] of rows) {
-      drawPanelBox(x + 34, ry - 4, 210, 32, 6, 'rgba(88, 226, 199, 0.12)', 'rgba(88, 226, 199, 0.35)', false);
-      ctx.font = `700 13.5px ${MONO_FONT}`;
+      drawPanelBox(x + 34, ry - 4, 210, 30, 6, 'rgba(88, 226, 199, 0.12)', 'rgba(88, 226, 199, 0.35)', false);
+      ctx.font = `700 13px ${MONO_FONT}`;
       ctx.fillStyle = PALETTE.hudCyan;
-      ctx.fillText(key, x + 46, ry + 6);
+      ctx.fillText(key, x + 46, ry + 5);
 
-      ctx.font = `400 15px ${FONT}`;
+      ctx.font = `400 14.5px ${FONT}`;
       ctx.fillStyle = '#e5e9f0';
-      ctx.fillText(desc, x + 262, ry + 5);
-      ry += 42;
+      ctx.fillText(desc, x + 262, ry + 4);
+      ry += 38;
     }
 
     ctx.font = `600 14px ${FONT}`;
@@ -1003,10 +1150,10 @@ export function createHudRenderer(canvas) {
 
     const win = state.outcome === OUTCOME_WIN;
     const fuelOut = state.outcome === OUTCOME_FUEL;
-    const w = 548;
-    const h = win ? 476 : 374;
+    const w = 576;
+    const h = win ? 506 : 374;
     const x = (FIELD.width - w) * 0.5;
-    const y = (FIELD.height - h) * 0.5;
+    const y = (FIELD.height - h) * 0.5 + 8;
     const accent = win ? PALETTE.hudGreen : fuelOut ? PALETTE.hudAmber : PALETTE.hudRed;
     const grad = ctx.createLinearGradient(x, y, x, y + h);
     grad.addColorStop(0, 'rgba(14, 22, 36, 0.88)');
@@ -1020,65 +1167,72 @@ export function createHudRenderer(canvas) {
 
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
-    ctx.font = `700 13px ${MONO_FONT}`;
+    ctx.font = `700 12.5px ${MONO_FONT}`;
     ctx.fillStyle = accent;
-    ctx.fillText(win ? 'MISSION COMPLETE' : fuelOut ? 'OUT OF FUEL' : 'FLIGHT TERMINATED', FIELD.width * 0.5, y + 26);
+    ctx.fillText(win ? 'MISSION COMPLETE' : fuelOut ? 'OUT OF FUEL' : 'FLIGHT TERMINATED', FIELD.width * 0.5, y + 18);
 
     ctx.save();
     ctx.shadowColor = 'rgba(0, 0, 0, 0.55)';
     ctx.shadowBlur = 10;
-    ctx.font = `800 34px ${FONT}`;
+    ctx.font = `800 30px ${FONT}`;
     ctx.fillStyle = PALETTE.hudText;
-    ctx.fillText(win ? 'SAFE TOUCHDOWN — RWY 36' : state.failReason || 'CRASH LANDING', FIELD.width * 0.5, y + 52);
+    ctx.fillText(win ? 'SAFE TOUCHDOWN — RWY 36' : state.failReason || 'CRASH LANDING', FIELD.width * 0.5, y + 38);
     ctx.restore();
 
     if (win) {
       const b = state.scoreBreakdown;
+      const maxStreak = state.maxCombo || 0;
+      const maxMult = maxStreak >= 5 ? 3 : maxStreak >= 3 ? 2 : 1;
+      const sinkFpm = Math.round(-(state.plane.touchdownSink || 0) * 196.85);
       const rows = [
-        ['Target Rings (8 / 8)', `${b.rings}`],
-        [`Time (${formatClock(state.missionTime)})`, `+${b.time}`],
-        [`Fuel Remaining (${Math.round(state.plane.fuel)}%)`, `+${b.fuel}`],
-        [`Landing Grade: ${state.plane.landingGrade}`, `+${b.landing}`],
+        ['Target Rings (8 / 8)', `${b.rings}`, PALETTE.hudAmber],
+        [`Time (${formatClock(state.missionTime)})`, `+${b.time}`, PALETTE.hudAmber],
+        [`Fuel Remaining (${Math.round(state.plane.fuel)}%)`, `+${b.fuel}`, PALETTE.hudAmber],
+        [`Landing Grade: ${state.plane.landingGrade}`, `+${b.landing}`, PALETTE.hudAmber],
+        ['PERFECT Rings', `${state.perfectRings || 0} / 8`, PALETTE.hudGreen],
+        ['Max Combo', `×${maxMult} (${maxStreak} streak)`, PALETTE.hudCyan],
+        ['Final Glideslope', state.plane.glideslopeGrade || 'ON GLIDESLOPE (A)', PALETTE.hudCyan],
+        ['Touchdown V/S', `-${(state.plane.touchdownSink || 0).toFixed(2)} m/s (${sinkFpm} fpm)`, PALETTE.hudGreen],
       ];
-      let ry = y + 116;
+      let ry = y + 88;
       for (let idx = 0; idx < rows.length; idx += 1) {
-        const [label, val] = rows[idx];
+        const [label, val, valCol] = rows[idx];
         if (idx % 2 === 0) {
-          roundRectPath(ctx, x + 42, ry - 6, w - 84, 32, 6);
+          roundRectPath(ctx, x + 40, ry - 4, w - 80, 26, 6);
           ctx.fillStyle = 'rgba(255, 255, 255, 0.04)';
           ctx.fill();
         }
         ctx.textAlign = 'left';
-        ctx.font = `500 16.5px ${FONT}`;
+        ctx.font = `500 14.5px ${FONT}`;
         ctx.fillStyle = '#d3dae6';
-        ctx.fillText(label, x + 56, ry);
+        ctx.fillText(label, x + 54, ry);
         ctx.textAlign = 'right';
-        ctx.font = `700 17px ${MONO_FONT}`;
-        ctx.fillStyle = PALETTE.hudAmber;
-        ctx.fillText(val, x + w - 56, ry);
-        ry += 38;
+        ctx.font = `700 14.5px ${MONO_FONT}`;
+        ctx.fillStyle = valCol;
+        ctx.fillText(val, x + w - 54, ry);
+        ry += 28;
       }
 
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)';
       ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.moveTo(x + 48, ry + 4);
-      ctx.lineTo(x + w - 48, ry + 4);
+      ctx.moveTo(x + 48, ry + 6);
+      ctx.lineTo(x + w - 48, ry + 6);
       ctx.stroke();
 
       ctx.textAlign = 'left';
-      ctx.font = `800 24px ${FONT}`;
+      ctx.font = `800 22px ${FONT}`;
       ctx.fillStyle = PALETTE.hudText;
-      ctx.fillText('FINAL SCORE', x + 56, ry + 20);
+      ctx.fillText('FINAL SCORE', x + 54, ry + 16);
       ctx.textAlign = 'right';
-      ctx.font = `800 28px ${MONO_FONT}`;
+      ctx.font = `800 26px ${MONO_FONT}`;
       ctx.fillStyle = PALETTE.hudGreen;
-      ctx.fillText(`${b.total}`, x + w - 56, ry + 18);
+      ctx.fillText(`${b.total}`, x + w - 54, ry + 14);
 
       ctx.textAlign = 'center';
-      ctx.font = `600 14px ${MONO_FONT}`;
+      ctx.font = `600 13.5px ${MONO_FONT}`;
       ctx.fillStyle = PALETTE.hudCyan;
-      ctx.fillText(`BEST SCORE: ${best}`, FIELD.width * 0.5, ry + 64);
+      ctx.fillText(`BEST SCORE: ${best}`, FIELD.width * 0.5, ry + 52);
     } else {
       ctx.font = `500 17px ${FONT}`;
       ctx.fillStyle = '#d3dae6';
@@ -1110,28 +1264,32 @@ export function createHudRenderer(canvas) {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.setTransform(view.scale, 0, 0, view.scale, view.x, view.y);
 
-    const { best = 0, selectedMode = MODE_MISSION, hoverId = null, muted = false, invertPitch = false, mouseYoke = false } = opts || {};
+    const { best = 0, selectedMode = MODE_MISSION, hoverId = null, muted = false, invertPitch = false, mouseYoke = false, cam = null } = opts || {};
+
+    drawSunGlare(cam);
 
     if (screen === SCREEN_TITLE) {
       drawTitleScreen(selectedMode, best, hoverId);
       return;
     }
 
-    // Active target position for compass & turn indicator
-    let targetPos = { x: RUNWAY.x, z: RUNWAY.zStart };
+    // Active target position for compass & edge arrow
+    let targetPos = { x: RUNWAY.x, y: RUNWAY.elevation + 14, z: RUNWAY.zStart };
     if (state.mode === MODE_MISSION && state.ringsPassed < MISSION_RINGS.length) {
       targetPos = MISSION_RINGS[state.ringsPassed];
     }
 
     drawCompassStrip(state, targetPos);
     drawMissionPanel(state, targetPos);
-    drawArtificialHorizon(state.plane);
-    drawLeftInstruments(state);
-    drawRightInstruments(state);
+    if (state.camMode !== 2 && screen !== SCREEN_OVER) {
+      drawArtificialHorizon(state.plane);
+      drawLeftInstruments(state);
+      drawRightInstruments(state);
+    }
 
     if (screen === SCREEN_PLAY) {
       drawTopRightControls(hoverId, muted, mouseYoke);
-      drawWarningsAndToast(state, targetPos);
+      drawWarningsAndToast(state, targetPos, cam);
     } else if (screen === SCREEN_PAUSED) {
       drawPauseModal(hoverId, invertPitch);
     } else if (screen === SCREEN_HELP) {

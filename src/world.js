@@ -1,9 +1,9 @@
 // Flight simulation & game rules: 3D orientation, aerodynamics, stall, fuel burn,
 // 8-ring course progression, terrain/water collisions, and Runway 36 landing grading.
 
-import { MISSION_RINGS, MODE_FREE, MODE_MISSION, PLANE, RUNWAY, SCORING, WORLD } from './config.js';
+import { MISSION_RINGS, MODE_FREE, MODE_MISSION, PLANE, RING_PRECISION, RUNWAY, SCORING, WORLD } from './config.js';
 import { clamp, cross3, dot3, lerp, normalize3, rotateAroundAxis, vec3, wrapAngle } from './math.js';
-import { isOnApron, isOnRunway, terrainHeight } from './terrain.js';
+import { isOnApron, isOnRunway, terrainHeight, waterLevelAt, windAt } from './terrain.js';
 
 export const EVENT_RING = 1;
 export const EVENT_STALL = 2;
@@ -40,6 +40,8 @@ export function createWorld() {
     touchdownSink: 0,
     touchdownOffset: 0,
     landingGrade: '',
+    glideslopeGrade: '',
+    glideslopeDeg: 0,
   };
 
   const state = {
@@ -47,10 +49,24 @@ export function createWorld() {
     plane,
     ringsPassed: 0,
     ringScore: 0,
+    ringCombo: 0,
+    maxCombo: 0,
+    comboMult: 1,
+    perfectRings: 0,
+    goodRings: 0,
+    grazeRings: 0,
+    lastRingGrade: '',
+    calloutText: '',
+    calloutSub: '',
+    calloutColor: '',
+    calloutTimer: 0,
+    wind: vec3(0, 0, 0),
+    lastControls: { pitch: 0, roll: 0, yaw: 0 },
     elapsed: 0,
     missionTime: 0,
     propPhase: 0,
     camMode: 0,
+    lastChaseMode: 0,
     outcome: OUTCOME_NONE,
     failReason: '',
     scoreBreakdown: {
@@ -74,6 +90,11 @@ export function createWorld() {
 
   const tmpA = vec3();
   const tmpB = vec3();
+  const windTmp = vec3();
+  const airVelTmp = vec3();
+  let ringMissCooldown = 0;
+  let gsErrorSum = 0;
+  let gsSamples = 0;
 
   function setBasisFromHeadingPitchRoll(heading, pitch, roll) {
     const ch = Math.cos(heading);
@@ -141,12 +162,33 @@ export function createWorld() {
     plane.touchdownSink = 0;
     plane.touchdownOffset = 0;
     plane.landingGrade = '';
+    plane.glideslopeGrade = '';
+    plane.glideslopeDeg = 0;
 
     state.ringsPassed = 0;
     state.ringScore = 0;
+    state.ringCombo = 0;
+    state.maxCombo = 0;
+    state.comboMult = 1;
+    state.perfectRings = 0;
+    state.goodRings = 0;
+    state.grazeRings = 0;
+    state.lastRingGrade = '';
+    state.calloutText = '';
+    state.calloutSub = '';
+    state.calloutColor = '';
+    state.calloutTimer = 0;
+    state.wind.x = 0;
+    state.wind.y = 0;
+    state.wind.z = 0;
+    state.lastControls.pitch = 0;
+    state.lastControls.roll = 0;
+    state.lastControls.yaw = 0;
     state.elapsed = 0;
     state.missionTime = 0;
     state.propPhase = 0;
+    state.camMode = 0;
+    state.lastChaseMode = 0;
     state.outcome = OUTCOME_NONE;
     state.failReason = '';
     state.scoreBreakdown.rings = 0;
@@ -154,11 +196,14 @@ export function createWorld() {
     state.scoreBreakdown.fuel = 0;
     state.scoreBreakdown.landing = 0;
     state.scoreBreakdown.total = 0;
-    state.toastText = mode === MODE_MISSION ? 'Fly through Ring 1: Valley Gate' : 'Free Flight — Practice flying & Runway 36 landings';
+    state.toastText = mode === MODE_MISSION ? 'Fly through Ring 1: Farmland Plain' : 'Free Flight — Practice flying & Runway 36 landings';
     state.toastTimer = 3.8;
     state.lowFuelAlerted = false;
     state.fuelOutAlerted = false;
     state.stallCooldown = 0;
+    ringMissCooldown = 0;
+    gsErrorSum = 0;
+    gsSamples = 0;
     state.wingTrail.length = 0;
     state.lastTrailTime = -10;
     state.ringBursts.length = 0;
@@ -180,22 +225,58 @@ export function createWorld() {
 
     const dPrev = (plane.prevPos.x - ring.x) * rx + (plane.prevPos.z - ring.z) * rz;
     const dCurr = (plane.pos.x - ring.x) * rx + (plane.pos.z - ring.z) * rz;
+    const crossedFwd = dPrev <= 0 && dCurr > 0;
+    const crossedPlane = (dPrev <= 0 && dCurr >= 0) || (dPrev >= 0 && dCurr <= 0);
 
-    // Crossed plane or within sphere capture
-    let minDist = Math.hypot(plane.pos.x - ring.x, plane.pos.y - ring.y, plane.pos.z - ring.z);
-    if ((dPrev <= 0 && dCurr >= 0) || (dPrev >= 0 && dCurr <= 0)) {
-      const frac = clamp(Math.abs(dPrev) / (Math.abs(dPrev) + Math.abs(dCurr) + 1e-6), 0, 1);
-      const ix = lerp(plane.prevPos.x, plane.pos.x, frac);
-      const iy = lerp(plane.prevPos.y, plane.pos.y, frac);
-      const iz = lerp(plane.prevPos.z, plane.pos.z, frac);
-      minDist = Math.min(minDist, Math.hypot(ix - ring.x, iy - ring.y, iz - ring.z));
-    }
+    if (!crossedPlane) return false;
+
+    const frac = clamp(Math.abs(dPrev) / (Math.abs(dPrev) + Math.abs(dCurr) + 1e-6), 0, 1);
+    const ix = lerp(plane.prevPos.x, plane.pos.x, frac);
+    const iy = lerp(plane.prevPos.y, plane.pos.y, frac);
+    const iz = lerp(plane.prevPos.z, plane.pos.z, frac);
+    const minDist = Math.hypot(ix - ring.x, iy - ring.y, iz - ring.z);
 
     if (minDist <= PLANE.ringPassMargin) {
-      const centerFactor = clamp(1 - minDist / PLANE.ringPassMargin, 0, 1);
-      const pts = Math.round(SCORING.ringBase + SCORING.ringCenterBonus * centerFactor);
+      const perfectR = PLANE.ringRadius * RING_PRECISION.perfectFrac;
+      const goodR = PLANE.ringRadius * RING_PRECISION.goodFrac;
+      let grade = 'GRAZE';
+      let basePts = RING_PRECISION.grazePoints;
+      let calloutCol = '#ffbe55';
+      if (minDist <= perfectR) {
+        grade = 'PERFECT';
+        basePts = SCORING.ringBase + SCORING.ringCenterBonus;
+        calloutCol = '#6ae67b';
+        state.perfectRings += 1;
+        plane.fuel = Math.min(PLANE.fuelCapacity, plane.fuel + RING_PRECISION.perfectRefuel);
+      } else if (minDist <= goodR) {
+        grade = 'GOOD';
+        basePts = SCORING.ringBase;
+        calloutCol = '#58e2c7';
+        state.goodRings += 1;
+      } else {
+        state.grazeRings += 1;
+      }
+
+      state.ringCombo += 1;
+      if (state.ringCombo > state.maxCombo) state.maxCombo = state.ringCombo;
+      state.comboMult =
+        state.ringCombo >= RING_PRECISION.combo5Threshold
+          ? 3
+          : state.ringCombo >= RING_PRECISION.combo3Threshold
+            ? 2
+            : 1;
+
+      const pts = Math.round(basePts * state.comboMult);
       state.ringScore += pts;
       state.ringsPassed += 1;
+      state.lastRingGrade = grade;
+      ringMissCooldown = 1.5;
+
+      state.calloutText = grade === 'PERFECT' ? `PERFECT! +${RING_PRECISION.perfectRefuel}% FUEL` : `${grade}!`;
+      state.calloutSub = state.comboMult > 1 ? `+${pts} PTS  (×${state.comboMult} COMBO)` : `+${pts} PTS`;
+      state.calloutColor = calloutCol;
+      state.calloutTimer = 1.65;
+
       state.ringBursts.push({
         x: ring.x,
         y: ring.y,
@@ -204,11 +285,24 @@ export function createWorld() {
         t: state.elapsed,
       });
       if (state.ringsPassed < MISSION_RINGS.length) {
-        setToast(`Ring ${state.ringsPassed}/8 Cleared (+${pts}) — Next: ${MISSION_RINGS[state.ringsPassed].label}`, 2.6);
+        setToast(`Ring ${state.ringsPassed}/8 ${grade} (+${pts}) — Next: ${MISSION_RINGS[state.ringsPassed].label}`, 2.6);
       } else {
         setToast('All 8 Rings Cleared! Land gently on Runway 36', 4.5);
       }
       return true;
+    }
+
+    // Missed ring flyby in forward direction: reset combo
+    if (crossedFwd && minDist > PLANE.ringPassMargin && minDist <= 95 && ringMissCooldown <= 0) {
+      ringMissCooldown = 2.0;
+      if (state.ringCombo > 0) {
+        state.ringCombo = 0;
+        state.comboMult = 1;
+        state.calloutText = 'MISSED RING';
+        state.calloutSub = 'COMBO RESET ×1';
+        state.calloutColor = '#ff5d55';
+        state.calloutTimer = 1.4;
+      }
     }
     return false;
   }
@@ -376,7 +470,14 @@ export function createWorld() {
     let events = 0;
     state.elapsed += dt;
     if (state.toastTimer > 0) state.toastTimer = Math.max(0, state.toastTimer - dt);
+    if (state.calloutTimer > 0) state.calloutTimer = Math.max(0, state.calloutTimer - dt);
     if (state.stallCooldown > 0) state.stallCooldown = Math.max(0, state.stallCooldown - dt);
+    if (ringMissCooldown > 0) ringMissCooldown = Math.max(0, ringMissCooldown - dt);
+    if (controls) {
+      state.lastControls.pitch = controls.pitch || 0;
+      state.lastControls.roll = controls.roll || 0;
+      state.lastControls.yaw = controls.yaw || 0;
+    }
 
     const enginePower = plane.fuel > 0 || state.mode === MODE_FREE || titleDemo ? plane.throttle : 0;
     state.propPhase += dt * (10 + enginePower * 46 + plane.speed * 0.25);
@@ -495,10 +596,19 @@ export function createWorld() {
 
     rotatePlaneBasis(pitchInput * dt, (rollInput + autoLevel) * dt, yawInput * dt);
 
-    // Compute speed & Angle of Attack
-    plane.speed = Math.hypot(plane.vel.x, plane.vel.y, plane.vel.z);
-    const velDir = plane.speed > 0.5 ? normalize3(plane.vel, tmpA) : plane.forward;
-    // AoA: angle between forward vector and velocity vector along plane's up axis
+    // Sample deterministic wind field & compute airspeed-relative kinematics
+    const wind = windAt(plane.pos.x, plane.pos.y, plane.pos.z, windTmp);
+    state.wind.x = wind.x;
+    state.wind.y = wind.y;
+    state.wind.z = wind.z;
+
+    airVelTmp.x = plane.vel.x - wind.x;
+    airVelTmp.y = plane.vel.y - wind.y;
+    airVelTmp.z = plane.vel.z - wind.z;
+    const airSpeed = Math.hypot(airVelTmp.x, airVelTmp.y, airVelTmp.z);
+    plane.speed = airSpeed;
+    const velDir = airSpeed > 0.5 ? normalize3(airVelTmp, tmpA) : plane.forward;
+    // AoA: angle between forward vector and air-relative velocity vector along plane's up axis
     const aoa = clamp(Math.asin(clamp(-dot3(velDir, plane.up), -0.95, 0.95)), -0.6, 0.6);
 
     // Stall check
@@ -514,7 +624,8 @@ export function createWorld() {
     }
 
     // Lift, Thrust, Drag, Gravity
-    const groundY = Math.max(WORLD.waterY, terrainHeight(plane.pos.x, plane.pos.z));
+    const waterY = waterLevelAt(plane.pos.x, plane.pos.z);
+    const groundY = Math.max(waterY, terrainHeight(plane.pos.x, plane.pos.z));
     const agl = Math.max(0, plane.pos.y - groundY);
     const groundEffect = 1 + 0.22 * clamp(1 - agl / 12, 0, 1);
 
@@ -524,7 +635,7 @@ export function createWorld() {
     const thrustAccel = enginePower * PLANE.maxThrustAccel;
     const dragAccel = (PLANE.dragBase + PLANE.inducedDrag * cl * cl) * plane.speed * plane.speed + (controls.brake ? 8.5 : 0);
 
-    // Align velocity gently toward nose (weathervane stability) reduced in stall
+    // Align air-relative velocity gently toward nose (weathervane stability) reduced in stall
     const alignRate = (stallingNow ? 1.1 : 3.2) * dt;
     const dirVel = plane.speed > 1 ? velDir : plane.forward;
 
@@ -546,22 +657,40 @@ export function createWorld() {
     plane.vel.y += ay * dt;
     plane.vel.z += az * dt;
 
-    // Weathervane alignment: blend velocity direction slightly toward aircraft nose
-    const newSpeed = clamp(Math.hypot(plane.vel.x, plane.vel.y, plane.vel.z), PLANE.minSpeed * 0.5, 92);
+    // Weathervane alignment on airmass-relative velocity, then add wind back
+    const relVx = plane.vel.x - wind.x;
+    const relVy = plane.vel.y - wind.y;
+    const relVz = plane.vel.z - wind.z;
+    const newSpeed = clamp(Math.hypot(relVx, relVy, relVz), PLANE.minSpeed * 0.5, 92);
     const blend = clamp(alignRate, 0, 0.35);
-    const nx = lerp(plane.vel.x / (newSpeed || 1), plane.forward.x, blend);
-    const ny = lerp(plane.vel.y / (newSpeed || 1), plane.forward.y, blend * 0.65);
-    const nz = lerp(plane.vel.z / (newSpeed || 1), plane.forward.z, blend);
+    const nx = lerp(relVx / (newSpeed || 1), plane.forward.x, blend);
+    const ny = lerp(relVy / (newSpeed || 1), plane.forward.y, blend * 0.65);
+    const nz = lerp(relVz / (newSpeed || 1), plane.forward.z, blend);
     const nLen = Math.hypot(nx, ny, nz) || 1;
-    plane.vel.x = (nx / nLen) * newSpeed;
-    plane.vel.y = (ny / nLen) * newSpeed;
-    plane.vel.z = (nz / nLen) * newSpeed;
+    plane.vel.x = (nx / nLen) * newSpeed + wind.x;
+    plane.vel.y = (ny / nLen) * newSpeed + wind.y;
+    plane.vel.z = (nz / nLen) * newSpeed + wind.z;
     plane.speed = newSpeed;
     plane.verticalSpeed = plane.vel.y;
 
     plane.pos.x += plane.vel.x * dt;
     plane.pos.y += plane.vel.y * dt;
     plane.pos.z += plane.vel.z * dt;
+
+    // Track final approach glideslope deviation once all 8 rings are cleared
+    if (
+      state.mode === MODE_MISSION &&
+      state.ringsPassed >= MISSION_RINGS.length &&
+      plane.pos.z <= RUNWAY.zStart + 900 &&
+      plane.pos.z >= RUNWAY.zStart - 75 &&
+      Math.abs(plane.pos.x - RUNWAY.x) < 160
+    ) {
+      const dzGs = Math.max(12, plane.pos.z - (RUNWAY.zStart - 75));
+      const dyGs = Math.max(0, plane.pos.y - RUNWAY.elevation);
+      const gsDeg = (Math.atan2(dyGs, dzGs) * 180) / Math.PI;
+      gsErrorSum += Math.abs(gsDeg - 6.1);
+      gsSamples += 1;
+    }
 
     // Soft world boundary turn-back cushion
     const bound = WORLD.half - 160;
@@ -590,7 +719,7 @@ export function createWorld() {
 
     // Ground / Water / Runway Touchdown Check
     const terrainY = terrainHeight(plane.pos.x, plane.pos.z);
-    if (terrainY <= WORLD.waterY && plane.pos.y <= WORLD.waterY + 1.1) {
+    if (terrainY <= waterY && plane.pos.y <= waterY + 1.1) {
       triggerCrash('Water Ditching', plane.fuel <= 0);
       events |= EVENT_CRASH | EVENT_OVER;
       return events;
@@ -618,6 +747,16 @@ export function createWorld() {
               : plane.touchdownSink <= PLANE.firmSinkSpeed
                 ? 'SMOOTH'
                 : 'FIRM';
+          const avgGsErr = gsSamples > 0 ? gsErrorSum / gsSamples : 0.4;
+          plane.glideslopeDeg = Number(avgGsErr.toFixed(1));
+          plane.glideslopeGrade =
+            avgGsErr <= 1.2
+              ? 'ON GLIDESLOPE (A)'
+              : avgGsErr <= 2.4
+                ? 'GOOD APPROACH (B)'
+                : avgGsErr <= 4.0
+                  ? 'FAIR APPROACH (C)'
+                  : 'HIGH/LOW (D)';
           setBasisFromHeadingPitchRoll(plane.heading, Math.max(0, plane.pitch), 0);
           emitTouchdownDust(sinkSpeed);
           events |= EVENT_TOUCHDOWN;

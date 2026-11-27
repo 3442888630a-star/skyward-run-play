@@ -11,6 +11,7 @@ export const ACTION_MUTE = 8;
 export const ACTION_INVERT = 16;
 export const ACTION_CAM = 32;
 export const ACTION_MOUSE_YOKE = 64;
+export const ACTION_COCKPIT = 128;
 
 export function createInput(canvas) {
   const held = new Set();
@@ -64,6 +65,7 @@ export function createInput(canvas) {
         invertPitch = !invertPitch;
         actions |= ACTION_INVERT;
       } else if (code === 'KeyC') actions |= ACTION_CAM;
+      else if (code === 'KeyV') actions |= ACTION_COCKPIT;
       else if (code === 'KeyU') {
         mouseYokeActive = !mouseYokeActive;
         actions |= ACTION_MOUSE_YOKE;

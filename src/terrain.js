@@ -2,12 +2,18 @@
 // zone-tint & detail Canvas textures, animated water normal map, textured Runway 36 + decals,
 // airfield + village + SE town, dense/sparse zoned trees, clouds, and far mountain band.
 
-import { MISSION_RINGS, PLANE, RUNWAY, WORLD } from './config.js';
+import { MISSION_RINGS, PLANE, RUNWAY, WIND, WORLD } from './config.js';
 import { clamp, lerp, smooth01 } from './math.js';
 import { createRandom, fbm2D, valueNoise2D } from './random.js';
 
 const TERRAIN_STEPS = 320;
 const TERRAIN_STEP_SIZE = WORLD.size / TERRAIN_STEPS;
+
+export const CANYON_WATER_Y = -124;
+const CANYON_FLOOR_Y = -119;
+const CANYON_BED_Y = -129.5;
+const WATERFALL_Z_TOP = -1352;
+const WATERFALL_Z_BOT = -1302;
 
 const FIELD_ANGLE = 0.24;
 const FIELD_COS = Math.cos(FIELD_ANGLE);
@@ -49,26 +55,71 @@ export function riverHalfWidth(z) {
   return 30 + 16 * Math.sin(z * 0.0029 + 1.1) + widen * 185;
 }
 
-/** Northern lake coastline Z coordinate at a given X. */
+/** Northern lake coastline Z coordinates (south and north shores) at a given X. */
 function lakeCoastZ(x) {
   const westShelf = smooth01((-1050 - x) / 1100) * 1450;
   return -1520 + 260 * Math.sin(x * 0.00085 + 0.5) + 130 * Math.cos(x * 0.0019) - westShelf;
 }
 
+function lakeNorthCoastZ(x) {
+  return -3280 + 180 * Math.sin(x * 0.00095 + 1.1) + 110 * Math.cos(x * 0.0021);
+}
+
 /** Distance factor inside the northern lake (positive = underwater basin). */
 function lakeMask(x, z) {
   const coastZ = lakeCoastZ(x);
-  return smooth01((coastZ - z) / 340);
+  const northZ = lakeNorthCoastZ(x);
+  const southFactor = smooth01((coastZ - z) / 340);
+  const northFactor = smooth01((z - northZ) / 380);
+  return southFactor * northFactor;
+}
+
+/** Water surface elevation at world (x, z): 0m on northern lake, -124m in canyon & south river. */
+export function waterLevelAt(x, z) {
+  if (z <= WATERFALL_Z_TOP) return WORLD.waterY;
+  if (z >= WATERFALL_Z_BOT) return CANYON_WATER_Y;
+  return lerp(WORLD.waterY, CANYON_WATER_Y, smooth01((z - WATERFALL_Z_TOP) / (WATERFALL_Z_BOT - WATERFALL_Z_TOP)));
+}
+
+/** Sharp ridged multifractal noise in [0, 1] for jagged alpine crests. */
+function ridged2D(x, z, octaves = 4, seed = 89) {
+  let sum = 0;
+  let amp = 0.55;
+  let freq = 1;
+  let weight = 1;
+  let norm = 0;
+  for (let i = 0; i < octaves; i += 1) {
+    let n = 1 - Math.abs(valueNoise2D(x * freq, z * freq, seed + i * 37) * 2 - 1);
+    n = n * n * weight;
+    weight = clamp(n * 1.65, 0.22, 1.0);
+    sum += n * amp;
+    norm += amp;
+    amp *= 0.5;
+    freq *= 2.12;
+  }
+  return sum / norm;
+}
+
+/** Distance from point (x, z) to 2D segment (ax, az)-(bx, bz). */
+function distToSeg2D(x, z, ax, az, bx, bz) {
+  const dx = bx - ax;
+  const dz = bz - az;
+  const lenSq = dx * dx + dz * dz || 1;
+  const t = clamp(((x - ax) * dx + (z - az) * dz) / lenSq, 0, 1);
+  return Math.hypot(x - (ax + dx * t), z - (az + dz * t));
 }
 
 /** Distance outside the flat airfield plateau (0 inside plateau, 1 outside). */
 function airfieldFlatten(x, z) {
-  const dx = Math.max(0, Math.abs(x - RUNWAY.x) - RUNWAY.apronWidth * 0.55);
+  const dx = x > RUNWAY.x
+    ? Math.max(0, x - 34)
+    : Math.max(0, -x - RUNWAY.apronWidth * 0.58);
   const zMin = RUNWAY.zEnd - RUNWAY.apronPaddingZ;
   const zMax = RUNWAY.zStart + RUNWAY.apronPaddingZ;
   const dz = z < zMin ? zMin - z : z > zMax ? z - zMax : 0;
+  const blend = x > RUNWAY.x && dz < 40 ? 78 : 140;
   const dist = Math.hypot(dx, dz);
-  return smooth01(dist / 140);
+  return smooth01(dist / blend);
 }
 
 /** Distance outside a circular settlement pad (0 inside flatRadius, 1 outside blend). */
@@ -91,10 +142,13 @@ export function sampleZoneWeights(x, z) {
   const nz = z + warpZ;
 
   const coastZ = lakeCoastZ(x);
+  const northCoastZ = lakeNorthCoastZ(x);
   const lake = lakeMask(x, z);
   const wetland = smooth01((coastZ + 620 - nz) / 480) * smooth01((nz - (coastZ - 260)) / 320) * smooth01((nx + 1950) / 700) * (1 - lake * 0.85);
-  const mountain = smooth01((-920 - nx) / 950);
-  const forest = smooth01((nx - 760) / 850) * smooth01((980 - nz) / 850) * (1 - lake);
+  const westMountain = smooth01((-1100 - nx) / 1000);
+  const northMountain = smooth01((northCoastZ + 180 - nz) / 760) * smooth01((3200 - nx) / 1500);
+  const mountain = clamp(Math.max(westMountain, northMountain), 0, 1);
+  const forest = smooth01((nx - 760) / 850) * smooth01((980 - nz) / 850) * (1 - lake) * (1 - northMountain * 0.7);
   const town = 1 - townFlatten(x, z);
   const airport = 1 - airfieldFlatten(x, z);
   const used = clamp(lake + wetland * 0.8 + mountain + forest + town + airport, 0, 1);
@@ -102,7 +156,7 @@ export function sampleZoneWeights(x, z) {
   return { farmland, forest, lake, wetland, mountain, town, airport };
 }
 
-/** Deterministic terrain height in meters at world (x, z). Values <= 0 are underwater. */
+/** Deterministic terrain height in meters at world (x, z). */
 export function terrainHeight(x, z) {
   const nBroad = fbm2D(x * 0.00048 + 12.3, z * 0.00048 - 7.1, 4, 17);
   const nDetail = fbm2D(x * 0.0022 - 4.2, z * 0.0022 + 9.4, 3, 53);
@@ -124,11 +178,27 @@ export function terrainHeight(x, z) {
   // Zone 2: East/NE dense forest rolling hills
   h += zones.forest * (18 + nBroad * 42 + ridgeNoise * 22);
 
-  // Zone 4: West/NW rugged mountains (snow-free ridges)
+  // Zone 4: West + North/NW snow-capped alpine mountain ranges (2.2-3x peaks, sharp ridgelines)
   if (zones.mountain > 0.001) {
-    const mRidge = 1 - Math.abs(fbm2D(x * 0.0009 + 2.1, z * 0.0009 - 4.3, 4, 89) * 2 - 1);
-    const mHeight = 48 + Math.pow(mRidge, 1.3) * 168 + nDetail * 18;
+    const mRidge = ridged2D(x * 0.00068 + 2.1, z * 0.00068 - 4.3, 4, 89);
+    const mCrest = ridged2D(x * 0.00165 - 1.4, z * 0.00165 + 3.2, 3, 137);
+    const mBase = fbm2D(x * 0.00038 + 5.4, z * 0.00038 - 1.9, 3, 43);
+    const farRangeBoost = 1.0 + 0.28 * smooth01((-2350 - x) / 1800) + 0.26 * smooth01((-3600 - z) / 1400);
+    const mHeight = (72 + Math.pow(mRidge, 1.1) * 660 + mCrest * 215 + mBase * 135) * farRangeBoost + nDetail * 14;
     h += zones.mountain * mHeight;
+
+    // Preserve a dramatic alpine pass around Ring 2 (-2100, 295, -250) and legs 1->2 / 2->3
+    const dRing2 = Math.hypot(x - (-2100), z - (-250));
+    const dPass12 = distToSeg2D(x, z, -2100, -250, 0, 1020);
+    const dPass23 = distToSeg2D(x, z, -2100, -250, -1150, -2550);
+    const pass2 = 1 - smooth01((dRing2 - 160) / 340);
+    const pass12 = 1 - smooth01((dPass12 - 140) / 320);
+    const pass23 = 1 - smooth01((dPass23 - 140) / 300);
+    const passFactor = Math.max(pass2, pass12 * 0.92, pass23 * 0.94);
+    if (passFactor > 0.001) {
+      const passFloor = 175 + nDetail * 14 - smooth01((-1000 - z) / 1400) * 65 - smooth01((x + 1500) / 600) * 90;
+      h = lerp(h, Math.min(h, passFloor), passFactor * 0.94);
+    }
   }
 
   // Zone 3: Low flat marsh/wetland shores + marshy peninsula near (-1150, -2450)
@@ -137,16 +207,44 @@ export function terrainHeight(x, z) {
   }
   const marshPeninsula = 1 - smooth01((Math.hypot(x - (-1150), z - (-2450)) - 220) / 340);
 
-  // Carve continuous winding river from northern lake down through entire valley
-  const rDist = Math.abs(x - riverCenterX(z));
+  // Carve continuous winding river + center-north Grand Canyon along riverCenterX(z)
+  const rCenter = riverCenterX(z);
+  const rDist = Math.abs(x - rCenter);
   const rHalf = riverHalfWidth(z);
-  const riverCarve = 1 - smooth01((rDist - rHalf * 0.72) / (rHalf * 2.2 + 52));
-  if (z > -1850) {
-    h = lerp(h, -5.5, riverCarve);
+  const canyonBlend = smooth01((z - (WATERFALL_Z_TOP - 45)) / 45);
+  let hRiver = h;
+  if (canyonBlend < 1) {
+    const outletCarve = 1 - smooth01((rDist - rHalf * 0.72) / (rHalf * 2.0 + 48));
+    if (z > -1850) {
+      hRiver = lerp(hRiver, -5.5, outletCarve);
+    }
   }
+  let hCanyon = h;
+  if (canyonBlend > 0) {
+    // Center-north Grand Canyon (-1340..+420) tapering into narrower southern gorge (+420..+860+)
+    const canyonBand = 1 - smooth01((z - 420) / 440);
+    const waterHalfW = lerp(24, 34, canyonBand) + 5 * Math.sin(z * 0.0041);
+    const floorHalfW = lerp(34, 74, canyonBand) + 10 * Math.sin(z * 0.0055 + 0.4);
+    const rimHalfW = lerp(86, 168, canyonBand) + 16 * Math.sin(z * 0.0037 + 0.8);
+
+    // Stratified red-rock stepped wall profile from floor to plain-level rim
+    const rawWallT = smooth01((rDist - floorHalfW) / Math.max(12, rimHalfW - floorHalfW));
+    const strataWallT = clamp(rawWallT + 0.042 * Math.sin(rawWallT * Math.PI * 4.0) * canyonBand, 0, 1);
+
+    // Waterfall cliff drop at canyon head (z in -1352..-1302)
+    const dropT = smooth01((z - WATERFALL_Z_TOP) / (WATERFALL_Z_BOT - WATERFALL_Z_TOP));
+    const targetBedY = lerp(-6.0, CANYON_BED_Y, dropT);
+    const targetFloorY = lerp(-3.0, CANYON_FLOOR_Y, dropT) + (nDetail - 0.5) * 3.8;
+    const channelT = smooth01((rDist - waterHalfW) / Math.max(8, floorHalfW - waterHalfW));
+    const innerY = lerp(targetBedY, targetFloorY, channelT);
+
+    hCanyon = lerp(h, innerY, 1 - strataWallT);
+  }
+  h = lerp(hRiver, hCanyon, canyonBlend);
 
   // Carve large northern lake (preserving marshy peninsula around Ring 3 shore)
-  const lMask = lakeMask(x, z) * (1 - marshPeninsula * 0.92);
+  const outletShield = smooth01((z - (WATERFALL_Z_TOP - 80)) / 90) * smooth01((rDist - 68) / 85);
+  const lMask = lakeMask(x, z) * (1 - marshPeninsula * 0.92) * (1 - outletShield);
   if (lMask > 0) {
     h = lerp(h, -14, lMask);
   }
@@ -154,12 +252,14 @@ export function terrainHeight(x, z) {
     h = lerp(h, 2.4 + nDetail * 2.2, marshPeninsula * 0.88);
   }
 
-  // Level settlement pads gently so all buildings sit flush
+  // Level settlement & farmstead pads gently so all buildings sit flush
   h = lerp(26, h, padFlatten(x, z, RIVER_HAMLET_CENTER.x, RIVER_HAMLET_CENTER.z, 98, 110));
   const lakePad = padFlatten(x, z, LAKE_VILLAGE_CENTER.x, LAKE_VILLAGE_CENTER.z, 88, 90);
   const lakeDryMask = smooth01((h - 0.8) / 2.4);
   h = lerp(7.5, h, 1 - (1 - lakePad) * lakeDryMask);
   h = lerp(52.5, h, padFlatten(x, z, FARMLAND_HAMLET_CENTER.x, FARMLAND_HAMLET_CENTER.z, 115, 115));
+  h = lerp(34, h, padFlatten(x, z, 575, 560, 28, 36));
+  h = lerp(42, h, padFlatten(x, z, 245, 2860, 28, 32));
 
   // Level Southeast Town plateau gently at 24m
   const tf = townFlatten(x, z);
@@ -222,7 +322,7 @@ function getTerrainHeightGrid() {
 }
 
 /** Sample the exact barycentric Y height of the rendered terrain mesh at (x, z). */
-function sampleMeshHeight(x, z) {
+export function sampleMeshHeight(x, z) {
   const grid = getTerrainHeightGrid();
   const stride = TERRAIN_STEPS + 1;
   const fx = clamp((unwarpCoord(x) + 1) * 0.5 * TERRAIN_STEPS, 0, TERRAIN_STEPS - 1e-4);
@@ -367,13 +467,17 @@ function plotPaletteColor(cellX, cellZ) {
   return [r * tint, g * tint, b * tint];
 }
 
-/** Smoothly shaded terrain AO & subtle slope/valley tint to multiply with 2048² ground texture. */
-function terrainVertexAO(h, ny, hAvgNeighbors) {
-  // Darken concave valleys, riverbanks, and steep rock crevices gently (fake AO)
+/** Baked valley & canyon ambient occlusion + subtle sun-facing high-slope lift. */
+function terrainVertexAO(h, nx, ny, nz, hAvgNeighbors, hRimAvg, hRimMax) {
   const concavity = Math.max(0, hAvgNeighbors - h);
-  const valleyAo = clamp(1.0 - concavity * 0.085, 0.74, 1.0);
-  const slopeAo = lerp(0.84, 1.0, smooth01((ny - 0.65) / 0.30));
-  const ao = valleyAo * slopeAo;
+  const valleyAo = clamp(1.0 - concavity * 0.075, 0.72, 1.0);
+  const rimDepth = Math.max(0, hRimAvg - h);
+  const wallDepth = Math.max(0, hRimMax - h);
+  const canyonAo = clamp(1.0 - rimDepth * 0.0048 - wallDepth * 0.0018, 0.56, 1.0);
+  const slopeAo = lerp(0.84, 1.0, smooth01((ny - 0.58) / 0.34));
+  const sunDot = Math.max(0, nx * -0.80 + ny * 0.27 + nz * -0.49);
+  const highLift = smooth01((h - 150) / 160) * sunDot * 0.09;
+  const ao = clamp(valleyAo * canyonAo * slopeAo + highLift, 0.50, 1.08);
   return [ao, ao * 0.995, ao * 0.985];
 }
 
@@ -425,7 +529,25 @@ export function buildTerrainMesh() {
       nz *= invLen;
 
       const hAvg = (hL + hR + hD + hU) * 0.25;
-      const [r, g, bl] = terrainVertexAO(h, ny, hAvg);
+      const ixL2 = Math.max(0, ix - 2);
+      const ixR2 = Math.min(steps, ix + 2);
+      const izD2 = Math.max(0, iz - 2);
+      const izU2 = Math.min(steps, iz + 2);
+      const ixL5 = Math.max(0, ix - 5);
+      const ixR5 = Math.min(steps, ix + 5);
+      const izD5 = Math.max(0, iz - 5);
+      const izU5 = Math.min(steps, iz + 5);
+      const h2L = hGrid[iz * stride + ixL2];
+      const h2R = hGrid[iz * stride + ixR2];
+      const h2D = hGrid[izD2 * stride + ix];
+      const h2U = hGrid[izU2 * stride + ix];
+      const h5L = hGrid[iz * stride + ixL5];
+      const h5R = hGrid[iz * stride + ixR5];
+      const h5D = hGrid[izD5 * stride + ix];
+      const h5U = hGrid[izU5 * stride + ix];
+      const hRimAvg = (h2L + h2R + h2D + h2U + h5L + h5R + h5D + h5U) * 0.125;
+      const hRimMax = Math.max(h2L, h2R, h2D, h2U, h5L, h5R, h5D, h5U);
+      const [r, g, bl] = terrainVertexAO(h, nx, ny, nz, hAvg, hRimAvg, hRimMax);
       vx[idx] = x;
       vy[idx] = h;
       vz[idx] = z;
@@ -718,13 +840,24 @@ export function buildGroundTextureCanvas() {
         b = lerp(b, 0.56 * strata, rockMix * 0.82);
       }
 
-      // Warm sand & wet silt along riverbanks and lake shorelines
-      const sandMix = 1 - smooth01((y - 0.35) / 3.2);
+      // Warm sand & wet silt along riverbanks and lake shorelines (relative to local water elevation)
+      const relY = y - waterLevelAt(x, z);
+      const sandMix = 1 - smooth01((relY - 0.35) / 3.2);
       if (sandMix > 0.001) {
-        const wet = 1 - smooth01((y + 0.3) / 1.2);
+        const wet = 1 - smooth01((relY + 0.3) / 1.2);
         r = lerp(r, lerp(0.84, 0.50, wet), sandMix * 0.88);
         g = lerp(g, lerp(0.76, 0.44, wet), sandMix * 0.88);
         b = lerp(b, lerp(0.56, 0.34, wet), sandMix * 0.88);
+      }
+
+      // Keep high alpine slopes & steep canyon cliffs neutral so photo rock/snowrock/snow read cleanly
+      const alpineNeutral = smooth01((y - 210) / 80);
+      const cliffNeutral = smooth01((0.76 - ny) / 0.14);
+      const keepNeutral = clamp(Math.max(alpineNeutral, cliffNeutral), 0, 1);
+      if (keepNeutral > 0.001) {
+        r = lerp(r, 0.96, keepNeutral * 0.88);
+        g = lerp(g, 0.96, keepNeutral * 0.88);
+        b = lerp(b, 0.96, keepNeutral * 0.88);
       }
 
       const idx = (py * BASE + px) * 4;
@@ -1101,45 +1234,198 @@ export function buildWaterNormalCanvas() {
   return canvas;
 }
 
-// --- Water Mesh (Depth-tagged for Realistic Shore & Reflection) ---
+// --- Water Mesh (Lake at 0m + Canyon/River at -124m, Depth-tagged) ---
 
 export function buildWaterMesh() {
   const b = createBuilder();
   const steps = 112;
   const stepSize = WORLD.size / steps;
-  const y = WORLD.waterY;
 
-  const emitWaterVert = (x, z) => {
+  const emitWaterVert = (x, z, waterY) => {
     const h = sampleMeshHeight(x, z);
-    const depth = clamp((y - h) / 4.8, 0, 1);
-    b.pushVert(x, y, z, 0, 1, 0, depth, 0.32, 0.44);
+    const depth = clamp((waterY - h) / 4.8, 0, 1);
+    b.pushVert(x, waterY, z, 0, 1, 0, depth, 0.32, 0.44);
+  };
+
+  const emitCell = (x0, x1, z0, z1, waterY) => {
+    const cx = (x0 + x1) * 0.5;
+    const cz = (z0 + z1) * 0.5;
+    if (
+      sampleMeshHeight(cx, cz) < waterY + 5.5 ||
+      sampleMeshHeight(x0, z0) < waterY + 3.5 ||
+      sampleMeshHeight(x1, z0) < waterY + 3.5 ||
+      sampleMeshHeight(x0, z1) < waterY + 3.5 ||
+      sampleMeshHeight(x1, z1) < waterY + 3.5
+    ) {
+      emitWaterVert(x0, z0, waterY);
+      emitWaterVert(x0, z1, waterY);
+      emitWaterVert(x1, z1, waterY);
+      emitWaterVert(x0, z0, waterY);
+      emitWaterVert(x1, z1, waterY);
+      emitWaterVert(x1, z0, waterY);
+    }
   };
 
   for (let iz = 0; iz < steps; iz += 1) {
     const z0 = -WORLD.half + iz * stepSize;
     const z1 = z0 + stepSize;
+    const zMid = (z0 + z1) * 0.5;
+    const inLake = z1 <= WATERFALL_Z_TOP + 24;
+    const inRiver = z0 >= WATERFALL_Z_BOT - 12;
+    if (!inLake && !inRiver) {
+      // Subdivide transition band near waterfall lip so lake & plunge pool meet cleanly
+      const sub = 4;
+      for (let sz = 0; sz < sub; sz += 1) {
+        const az0 = lerp(z0, z1, sz / sub);
+        const az1 = lerp(z0, z1, (sz + 1) / sub);
+        const azMid = (az0 + az1) * 0.5;
+        if (azMid > WATERFALL_Z_TOP && azMid < WATERFALL_Z_BOT) continue;
+        const wy = azMid <= WATERFALL_Z_TOP ? WORLD.waterY : CANYON_WATER_Y;
+        for (let ix = 0; ix < steps; ix += 1) {
+          const x0 = -WORLD.half + ix * stepSize;
+          const x1 = x0 + stepSize;
+          const nearRiver = Math.abs((x0 + x1) * 0.5 - riverCenterX(azMid)) < 260;
+          if (nearRiver) {
+            for (let sx = 0; sx < sub; sx += 1) {
+              emitCell(lerp(x0, x1, sx / sub), lerp(x0, x1, (sx + 1) / sub), az0, az1, wy);
+            }
+          } else {
+            emitCell(x0, x1, az0, az1, wy);
+          }
+        }
+      }
+      continue;
+    }
+
+    const waterY = inLake ? WORLD.waterY : CANYON_WATER_Y;
+    const rCenter = riverCenterX(zMid);
     for (let ix = 0; ix < steps; ix += 1) {
       const x0 = -WORLD.half + ix * stepSize;
       const x1 = x0 + stepSize;
-      const cx = (x0 + x1) * 0.5;
-      const cz = (z0 + z1) * 0.5;
-      if (
-        sampleMeshHeight(cx, cz) < 5.5 ||
-        sampleMeshHeight(x0, z0) < 3.5 ||
-        sampleMeshHeight(x1, z0) < 3.5 ||
-        sampleMeshHeight(x0, z1) < 3.5 ||
-        sampleMeshHeight(x1, z1) < 3.5
-      ) {
-        emitWaterVert(x0, z0);
-        emitWaterVert(x0, z1);
-        emitWaterVert(x1, z1);
-        emitWaterVert(x0, z0);
-        emitWaterVert(x1, z1);
-        emitWaterVert(x1, z0);
+      if (inRiver && Math.abs((x0 + x1) * 0.5 - rCenter) < 240) {
+        // Subdivide river corridor cells 3x3 (~31m) so water sits cleanly inside canyon walls
+        const sub = 3;
+        for (let sz = 0; sz < sub; sz += 1) {
+          const az0 = lerp(z0, z1, sz / sub);
+          const az1 = lerp(z0, z1, (sz + 1) / sub);
+          for (let sx = 0; sx < sub; sx += 1) {
+            emitCell(lerp(x0, x1, sx / sub), lerp(x0, x1, (sx + 1) / sub), az0, az1, waterY);
+          }
+        }
+      } else {
+        emitCell(x0, x1, z0, z1, waterY);
       }
     }
   }
   return b.toMesh();
+}
+
+/** Curved near-vertical waterfall curtain at the northern lake outlet into the canyon head. */
+export function buildWaterfallMesh() {
+  const b = createBuilder(true);
+  const cols = 10;
+  const rows = 14;
+  const halfW = 39;
+
+  const samplePt = (u, t) => {
+    // t=0 at lake lip (-1350, y=0.6), t=1 at plunge pool (-1298, y=-124.4)
+    const zBase = lerp(WATERFALL_Z_TOP + 2, WATERFALL_Z_BOT + 4, Math.pow(t, 0.88));
+    const cx = riverCenterX(zBase);
+    const s = u * 2 - 1; // -1..1 across width
+    const archBulge = (1 - s * s) * (4.5 + 8.5 * Math.sin(t * Math.PI * 0.7));
+    const x = cx + s * halfW * lerp(0.92, 1.08, t);
+    const y = lerp(0.6, CANYON_WATER_Y - 0.5, Math.pow(t, 1.12));
+    const z = zBase + archBulge;
+    return { x, y, z, nx: s * 0.28, ny: lerp(0.45, 0.14, t), nz: 0.94 };
+  };
+
+  for (let r = 0; r < rows; r += 1) {
+    const t0 = r / rows;
+    const t1 = (r + 1) / rows;
+    const v0 = t0 * 2.2;
+    const v1 = t1 * 2.2;
+    for (let c = 0; c < cols; c += 1) {
+      const u0 = c / cols;
+      const u1 = (c + 1) / cols;
+      const p00 = samplePt(u0, t0);
+      const p10 = samplePt(u1, t0);
+      const p01 = samplePt(u0, t1);
+      const p11 = samplePt(u1, t1);
+      b.pushVert(p00.x, p00.y, p00.z, p00.nx, p00.ny, p00.nz, 0.96, 0.98, 1.0, u0, v0);
+      b.pushVert(p01.x, p01.y, p01.z, p01.nx, p01.ny, p01.nz, 0.96, 0.98, 1.0, u0, v1);
+      b.pushVert(p11.x, p11.y, p11.z, p11.nx, p11.ny, p11.nz, 0.96, 0.98, 1.0, u1, v1);
+
+      b.pushVert(p00.x, p00.y, p00.z, p00.nx, p00.ny, p00.nz, 0.96, 0.98, 1.0, u0, v0);
+      b.pushVert(p11.x, p11.y, p11.z, p11.nx, p11.ny, p11.nz, 0.96, 0.98, 1.0, u1, v1);
+      b.pushVert(p10.x, p10.y, p10.z, p10.nx, p10.ny, p10.nz, 0.96, 0.98, 1.0, u1, v0);
+    }
+  }
+  return b.toMesh();
+}
+
+/** Elliptical plunge-pool foam ring at the base of the waterfall. */
+export function buildWaterfallFoamMesh() {
+  const b = createBuilder(true);
+  const segs = 24;
+  const rings = 4;
+  const cz = WATERFALL_Z_BOT + 14;
+  const cx = riverCenterX(cz);
+  const y = CANYON_WATER_Y + 0.36;
+  const rx = 68;
+  const rz = 52;
+
+  for (let ring = 0; ring < rings; ring += 1) {
+    const r0 = ring / rings;
+    const r1 = (ring + 1) / rings;
+    for (let s = 0; s < segs; s += 1) {
+      const a0 = (s / segs) * Math.PI * 2;
+      const a1 = ((s + 1) / segs) * Math.PI * 2;
+      const c0 = Math.cos(a0);
+      const s0 = Math.sin(a0);
+      const c1 = Math.cos(a1);
+      const s1 = Math.sin(a1);
+
+      const u00 = c0 * r0;
+      const v00 = s0 * r0;
+      const u10 = c1 * r0;
+      const v10 = s1 * r0;
+      const u01 = c0 * r1;
+      const v01 = s0 * r1;
+      const u11 = c1 * r1;
+      const v11 = s1 * r1;
+
+      b.pushVert(cx + u00 * rx, y, cz + v00 * rz, 0, 1, 0, 1, 1, 1, u00, v00);
+      b.pushVert(cx + u01 * rx, y, cz + v01 * rz, 0, 1, 0, 1, 1, 1, u01, v01);
+      b.pushVert(cx + u11 * rx, y, cz + v11 * rz, 0, 1, 0, 1, 1, 1, u11, v11);
+
+      b.pushVert(cx + u00 * rx, y, cz + v00 * rz, 0, 1, 0, 1, 1, 1, u00, v00);
+      b.pushVert(cx + u11 * rx, y, cz + v11 * rz, 0, 1, 0, 1, 1, 1, u11, v11);
+      b.pushVert(cx + u10 * rx, y, cz + v10 * rz, 0, 1, 0, 1, 1, 1, u10, v10);
+    }
+  }
+  return b.toMesh();
+}
+
+/** Bright unlit volumetric mist puffs rising around the waterfall plunge pool. */
+export function buildWaterfallMistMesh() {
+  const b = createBuilder();
+  const centers = [];
+  const rand = createRandom(4409);
+  const baseZ = WATERFALL_Z_BOT + 16;
+  const baseX = riverCenterX(baseZ);
+  for (let i = 0; i < 18; i += 1) {
+    const spread = i / 18;
+    const mx = baseX + (rand() - 0.5) * 92;
+    const mz = baseZ + (rand() - 0.3) * 86;
+    const my = CANYON_WATER_Y + 4 + spread * 54 + rand() * 12;
+    const rx = 18 + rand() * 20;
+    const ry = 10 + rand() * 13;
+    const rz = 16 + rand() * 18;
+    addCloudBlob(b, centers, mx, mz, mx, my, mz, rx, ry, rz, 0.99, 0.98, 0.99, i * 1.13);
+  }
+  const mesh = b.toMesh();
+  mesh.centers = new Float32Array(centers);
+  return mesh;
 }
 
 // --- Textured Runway Mesh & Airfield Facilities ---
@@ -2513,22 +2799,24 @@ function addSmoothCanopy(b, cx, cy, cz, rx, ry, rz, r, g, bl, lonSegs = 9, latSe
 }
 
 /** Type 1: Smooth-shaded conifer with cylindrical trunk + 3 layered smooth foliage cones. */
-function addConiferTree(b, x, y, z, scale, shade, rot = 0) {
+function addConiferTree(b, x, y, z, scale, shade, rot = 0, tint = [1, 1, 1]) {
+  const [tr, tg, tb] = tint;
   addSmoothCylinder(b, x, y, z, 0.55 * scale, 0.24 * scale, 4.2 * scale, 6, 0.29, 0.20, 0.13);
-  addSmoothCone(b, x, y + 2.5 * scale, z, 5.4 * scale, 3.8 * scale, 8, 0.13 * shade, 0.29 * shade, 0.15 * shade, rot);
-  addSmoothCone(b, x, y + 5.1 * scale, z, 4.9 * scale, 3.0 * scale, 8, 0.16 * shade, 0.34 * shade, 0.17 * shade, rot + 0.42);
-  addSmoothCone(b, x, y + 7.7 * scale, z, 4.4 * scale, 2.0 * scale, 8, 0.19 * shade, 0.39 * shade, 0.19 * shade, rot + 0.85);
+  addSmoothCone(b, x, y + 2.5 * scale, z, 5.4 * scale, 3.8 * scale, 8, 0.13 * shade * tr, 0.29 * shade * tg, 0.15 * shade * tb, rot);
+  addSmoothCone(b, x, y + 5.1 * scale, z, 4.9 * scale, 3.0 * scale, 8, 0.16 * shade * tr, 0.34 * shade * tg, 0.17 * shade * tb, rot + 0.42);
+  addSmoothCone(b, x, y + 7.7 * scale, z, 4.4 * scale, 2.0 * scale, 8, 0.19 * shade * tr, 0.39 * shade * tg, 0.19 * shade * tb, rot + 0.85);
 }
 
 /** Type 2: Broadleaf oak/deciduous with tapered cylindrical trunk + multi-lobe smooth canopy. */
-function addBroadleafTree(b, x, y, z, scale, shade, rot = 0) {
+function addBroadleafTree(b, x, y, z, scale, shade, rot = 0, tint = [1, 1, 1]) {
+  const [tr, tg, tb] = tint;
   addSmoothCylinder(b, x, y, z, 0.56 * scale, 0.34 * scale, 4.6 * scale, 6, 0.31, 0.22, 0.14);
   const c = Math.cos(rot);
   const s = Math.sin(rot);
   const warmShift = (shade - 0.95) * 0.08;
-  const cr = clamp((0.22 + warmShift) * shade, 0, 1);
-  const cg = clamp(0.41 * shade, 0, 1);
-  const cb = clamp(0.16 * shade, 0, 1);
+  const cr = clamp((0.22 + warmShift) * shade * tr, 0, 1);
+  const cg = clamp(0.41 * shade * tg, 0, 1);
+  const cb = clamp(0.16 * shade * tb, 0, 1);
   const cy = y + 6.0 * scale;
   addSmoothCanopy(b, x, cy, z, 3.6 * scale, 3.0 * scale, 3.5 * scale, cr, cg, cb, 9, 4, rot);
   addSmoothCanopy(
@@ -2564,11 +2852,12 @@ function addBroadleafTree(b, x, y, z, scale, shade, rot = 0) {
 }
 
 /** Type 3: Tall slender poplar / cypress with smooth oval crown. */
-function addPoplarTree(b, x, y, z, scale, shade, rot = 0) {
+function addPoplarTree(b, x, y, z, scale, shade, rot = 0, tint = [1, 1, 1]) {
+  const [tr, tg, tb] = tint;
   addSmoothCylinder(b, x, y, z, 0.44 * scale, 0.24 * scale, 3.8 * scale, 6, 0.30, 0.22, 0.15);
-  const cr = 0.19 * shade;
-  const cg = 0.38 * shade;
-  const cb = 0.17 * shade;
+  const cr = clamp(0.19 * shade * tr, 0, 1);
+  const cg = clamp(0.38 * shade * tg, 0, 1);
+  const cb = clamp(0.17 * shade * tb, 0, 1);
   addSmoothCanopy(b, x, y + 5.4 * scale, z, 2.3 * scale, 3.6 * scale, 2.3 * scale, cr, cg, cb, 8, 4, rot);
   addSmoothCanopy(b, x, y + 8.6 * scale, z, 1.7 * scale, 3.2 * scale, 1.7 * scale, cr * 1.06, cg * 1.06, cb * 1.04, 8, 4, rot + 1.5);
 }
@@ -2578,8 +2867,11 @@ function isTreeForbidden(x, z) {
   if (Math.abs(x) < 116 && z > -355 && z < 390) return true;
   // Runway 36 final-approach clearway
   if (Math.abs(x) < 44 && z >= 320 && z < 1150) return true;
-  // River channel & immediate banks
-  if (z > -1850 && Math.abs(x - riverCenterX(z)) < riverHalfWidth(z) + 26) return true;
+  // River channel, canyon walls & immediate banks
+  if (z > -1850) {
+    const canyonClear = z > WATERFALL_Z_TOP ? (z < 850 ? 172 : 95) : riverHalfWidth(z) + 26;
+    if (Math.abs(x - riverCenterX(z)) < canyonClear) return true;
+  }
   // Village roads & farm tracks
   if (isNearRoad(x, z, 9.5)) return true;
   // Town street grid (uses original 44 houses so tree mesh vertex count remains invariant)
@@ -2671,34 +2963,41 @@ export function buildTreesMesh(random) {
     }
   }
 
+  const treeTint = () => [
+    0.90 + random() * 0.20,
+    0.92 + random() * 0.16,
+    0.88 + random() * 0.20,
+  ];
+
   // 2. Zoned woodland placement across the 10,400m world (~620 general + ~420 dense forest + ~125 town/wetland)
   let placed = 0;
   let attempts = 0;
-  while (placed < 620 && attempts < 8400) {
+  while (placed < 620 && attempts < 9600) {
     attempts += 1;
     const x = (random() * 2 - 1) * (WORLD.half - 240);
     const z = (random() * 2 - 1) * (WORLD.half - 240);
     if (isTreeForbidden(x, z)) continue;
     const h = sampleMeshHeight(x, z);
     const ny = terrainNormalY(x, z);
-    if (h < 2.8 || h > 155 || ny < 0.74) continue;
+    if (h < 2.8 || h > 235 || ny < 0.74) continue;
     const zones = sampleZoneWeights(x, z);
     const cluster = valueNoise2D(x * 0.0022, z * 0.0022, 404);
     const threshold = lerp(0.46, 0.24, zones.forest) + zones.mountain * 0.16;
     if (cluster < threshold) continue;
 
-    const scale = 0.85 + random() * 0.80;
+    const scale = 0.70 + random() * 0.80;
     const shade = (0.86 + random() * 0.26) * lerp(1.0, 0.82, zones.forest);
+    const tint = treeTint();
     const rot = random() * Math.PI * 2;
     const typeRoll = random();
     if (zones.wetland > 0.45 && h < 8) {
-      addSmoothCanopy(b, x, h + 1.4, z, 2.8 * scale, 1.9 * scale, 2.8 * scale, 0.17 * shade, 0.34 * shade, 0.16 * shade, 7, 3, rot);
+      addSmoothCanopy(b, x, h + 1.4, z, 2.8 * scale, 1.9 * scale, 2.8 * scale, 0.17 * shade * tint[0], 0.34 * shade * tint[1], 0.16 * shade * tint[2], 7, 3, rot);
     } else if (h > 50 || zones.mountain > 0.4 || typeRoll < lerp(0.45, 0.72, zones.forest)) {
-      addConiferTree(b, x, h - 0.25, z, scale, shade, rot);
+      addConiferTree(b, x, h - 0.25, z, scale, shade, rot, tint);
     } else if (typeRoll < 0.84) {
-      addBroadleafTree(b, x, h - 0.25, z, scale, shade, rot);
+      addBroadleafTree(b, x, h - 0.25, z, scale, shade, rot, tint);
     } else {
-      addPoplarTree(b, x, h - 0.25, z, scale, shade, rot);
+      addPoplarTree(b, x, h - 0.25, z, scale, shade, rot, tint);
     }
     placed += 1;
   }
@@ -2713,15 +3012,16 @@ export function buildTreesMesh(random) {
     if (isTreeForbidden(x, z)) continue;
     const h = sampleMeshHeight(x, z);
     const ny = terrainNormalY(x, z);
-    if (h < 4.0 || h > 135 || ny < 0.72) continue;
+    if (h < 4.0 || h > 160 || ny < 0.72) continue;
     const zones = sampleZoneWeights(x, z);
     if (zones.forest < 0.25) continue;
 
-    const scale = 0.90 + random() * 0.85;
+    const scale = 0.72 + random() * 0.78;
     const shade = 0.72 + random() * 0.24;
+    const tint = treeTint();
     const rot = random() * Math.PI * 2;
-    if (random() < 0.74) addConiferTree(b, x, h - 0.25, z, scale, shade, rot);
-    else addBroadleafTree(b, x, h - 0.25, z, scale, shade, rot);
+    if (random() < 0.74) addConiferTree(b, x, h - 0.25, z, scale, shade, rot, tint);
+    else addBroadleafTree(b, x, h - 0.25, z, scale, shade, rot, tint);
     forestPlaced += 1;
   }
 
@@ -2739,13 +3039,14 @@ export function buildTreesMesh(random) {
     if (h < 3.5 || h > 60 || ny < 0.84) continue;
     if (valueNoise2D(x * 0.004, z * 0.004, 515) < 0.34) continue;
 
-    const scale = 0.85 + random() * 0.65;
+    const scale = 0.70 + random() * 0.80;
     const shade = 0.88 + random() * 0.24;
+    const tint = treeTint();
     const rot = random() * Math.PI * 2;
     const typeRoll = random();
-    if (typeRoll < 0.36) addConiferTree(b, x, h - 0.25, z, scale, shade, rot);
-    else if (typeRoll < 0.78) addBroadleafTree(b, x, h - 0.25, z, scale, shade, rot);
-    else addPoplarTree(b, x, h - 0.25, z, scale, shade, rot);
+    if (typeRoll < 0.36) addConiferTree(b, x, h - 0.25, z, scale, shade, rot, tint);
+    else if (typeRoll < 0.78) addBroadleafTree(b, x, h - 0.25, z, scale, shade, rot, tint);
+    else addPoplarTree(b, x, h - 0.25, z, scale, shade, rot, tint);
     corridorPlaced += 1;
   }
 
@@ -2761,13 +3062,14 @@ export function buildTreesMesh(random) {
     const h = sampleMeshHeight(x, z);
     if (h < 4 || h > 45) continue;
 
-    const scale = 0.75 + random() * 0.55;
+    const scale = 0.70 + random() * 0.65;
     const shade = 0.88 + random() * 0.24;
+    const tint = treeTint();
     const rot = random() * Math.PI * 2;
     const typeRoll = random();
-    if (typeRoll < 0.55) addBroadleafTree(b, x, h - 0.2, z, scale, shade, rot);
-    else if (typeRoll < 0.85) addPoplarTree(b, x, h - 0.2, z, scale, shade, rot);
-    else addConiferTree(b, x, h - 0.2, z, scale, shade, rot);
+    if (typeRoll < 0.55) addBroadleafTree(b, x, h - 0.2, z, scale, shade, rot, tint);
+    else if (typeRoll < 0.85) addPoplarTree(b, x, h - 0.2, z, scale, shade, rot, tint);
+    else addConiferTree(b, x, h - 0.2, z, scale, shade, rot, tint);
     villagePlaced += 1;
   }
 
@@ -2999,4 +3301,59 @@ export function buildBeaconMesh(radius = 2.4, height = 180) {
     b.quad(x0, 0, z0, x1, 0, z1, x1, height, z1, x0, height, z0, 1.0, 0.84, 0.36);
   }
   return b.toMesh();
+}
+
+const KT_TO_MS = 0.514444;
+
+/**
+ * Deterministic golden-hour wind field:
+ * (a) Canyon channel wind blowing along riverCenterX(z) tangent (~6-12 kt scaled by rim depth).
+ * (b) Ridge lift updraft (up to ~+3 m/s) on windward (S/E) slopes of the snow ranges.
+ */
+export function windAt(x, y, z, out = { x: 0, y: 0, z: 0 }) {
+  let wx = 0;
+  let wy = 0;
+  let wz = 0;
+
+  // (a) Canyon channel wind along canyon axis
+  if (z > WATERFALL_Z_TOP - 60 && z < 880) {
+    const rCenter = riverCenterX(z);
+    const canyonBand = 1 - smooth01((z - 420) / 440);
+    const rimHalfW = lerp(86, 168, canyonBand) + 16 * Math.sin(z * 0.0037 + 0.8);
+    const radialDist = Math.abs(x - rCenter);
+    if (radialDist < rimHalfW * 1.2) {
+      const alongIn = smooth01((z - (WATERFALL_Z_TOP - 40)) / 110);
+      const alongMask = alongIn * canyonBand;
+      const acrossMask = 1 - smooth01(radialDist / (rimHalfW * 1.2));
+      const depthT = clamp((WIND.canyonRimY + 20 - y) / (WIND.canyonRimY + 20 - WIND.canyonFloorY), 0, 1);
+      if (alongMask > 0.001 && acrossMask > 0.001 && depthT > 0.001) {
+        const speedKt = lerp(WIND.canyonMinKt, WIND.canyonMaxKt, depthT);
+        const speedMs = speedKt * KT_TO_MS * alongMask * acrossMask;
+        const dxdz = 210 * 0.0017 * Math.cos(z * 0.0017) - 95 * 0.0039 * Math.sin(z * 0.0039);
+        const tLen = Math.hypot(dxdz, 1) || 1;
+        wx += (dxdz / tLen) * speedMs;
+        wz += (1 / tLen) * speedMs;
+      }
+    }
+  }
+
+  // (b) Ridge lift on windward (south/east-facing) slopes of snow ranges
+  if (x < -900 || z < -2800) {
+    const d = 36;
+    const h0 = terrainHeight(x, z);
+    if (h0 > 125) {
+      const hx = terrainHeight(x + d, z);
+      const hz = terrainHeight(x, z + d);
+      const slopeSE = clamp(((h0 - hx) / d + (h0 - hz) / d) * 0.72, 0, 1);
+      const agl = Math.max(0, y - h0);
+      const altFade = 1 - smooth01((agl - 35) / 230);
+      const rangeWeight = smooth01((h0 - 125) / 180);
+      wy += WIND.ridgeMaxUpdraft * slopeSE * rangeWeight * altFade;
+    }
+  }
+
+  out.x = wx;
+  out.y = wy;
+  out.z = wz;
+  return out;
 }

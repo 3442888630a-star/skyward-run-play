@@ -141,12 +141,20 @@ export function createAudio() {
     osc.stop(start + duration + 0.02);
   }
 
-  function playRing(ringIndex) {
-    // Ascending pentatonic chime per ring
+  function playRing(ringIndex, comboMult = 1, isPerfect = false) {
+    // Ascending pentatonic chime per ring; pitch rises with combo (+0 / +3 / +6 semitones)
     const scale = [523.25, 587.33, 659.25, 783.99, 880.0, 987.77, 1046.5, 1174.66];
-    const root = scale[clamp(ringIndex - 1, 0, scale.length - 1)];
-    playTone(root, 0.32, 'triangle', 0.24, 0);
-    playTone(root * 1.5, 0.42, 'sine', 0.18, 0.06);
+    const baseRoot = scale[clamp(ringIndex - 1, 0, scale.length - 1)];
+    const semitones = comboMult >= 3 ? 6 : comboMult >= 2 ? 3 : 0;
+    const root = baseRoot * Math.pow(2, semitones / 12);
+    if (isPerfect) {
+      // Brighter two-note chime for PERFECT ring passes
+      playTone(root, 0.28, 'triangle', 0.25, 0);
+      playTone(root * 1.5, 0.44, 'triangle', 0.22, 0.06);
+    } else {
+      playTone(root, 0.34, 'triangle', 0.22, 0);
+      playTone(root * 1.5, 0.38, 'sine', 0.12, 0.06);
+    }
   }
 
   function playStall() {

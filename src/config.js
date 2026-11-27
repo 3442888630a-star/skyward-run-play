@@ -107,7 +107,7 @@ export const MISSION_RINGS = [
   { x: 1150, y: 170, z: -2650, heading: 1.65, label: 'Mirror Lake' },
   { x: 2450, y: 215, z: -750, heading: 2.75, label: 'Emerald Forest' },
   { x: 1380, y: 175, z: 1220, heading: -2.65, label: 'Oakwood Town' },
-  { x: 420, y: 145, z: 1920, heading: -1.95, label: 'River Bend' },
+  { x: 447, y: -62, z: 120, heading: -0.18, label: 'River Canyon' },
   { x: 0, y: 92, z: 1080, heading: 0, label: 'Final 36' },
 ];
 
@@ -120,6 +120,25 @@ export const SCORING = {
   landingButter: 1000,
   landingSmooth: 750,
   landingFirm: 450,
+};
+
+/** Deterministic wind field constants (canyon channel wind + alpine ridge lift). */
+export const WIND = {
+  canyonMinKt: 6,
+  canyonMaxKt: 12,
+  canyonRimY: 25,
+  canyonFloorY: -124,
+  ridgeMaxUpdraft: 3.0,
+};
+
+/** Ring precision tiers, PERFECT fuel reward, and consecutive combo thresholds. */
+export const RING_PRECISION = {
+  perfectFrac: 0.35,
+  goodFrac: 0.75,
+  perfectRefuel: 4,
+  grazePoints: 100,
+  combo3Threshold: 3,
+  combo5Threshold: 5,
 };
 
 export const MODE_MISSION = 'mission';
