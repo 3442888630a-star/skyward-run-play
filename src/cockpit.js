@@ -1,34 +1,35 @@
-// First-person cockpit 3D geometry (nose cowl, windshield pillars, glareshield, charcoal panel,
-// twin-grip yoke) and crisp 1024x512 live Canvas instrument cluster (6-pack + auxiliary fuel).
+// First-person cockpit 3D geometry (sculpted nose cowl, dark upholstered A-pillars, glareshield,
+// charcoal panel, twin-grip yoke) and sharp 2048x1024 live Canvas instrument cluster.
 
 import { MODE_FREE, MISSION_RINGS, PLANE } from './config.js';
 import { clamp, lerp } from './math.js';
 
-export const COCKPIT_EYE = { x: 0, y: 0.66, z: -1.10 };
-export const COCKPIT_LOOK_PITCH = -0.098;
+export const COCKPIT_EYE = { x: 0, y: 0.635, z: -0.84 };
+export const COCKPIT_LOOK_PITCH = -0.224;
 
-// Textured instrument face bounds in aircraft-local coordinates (2:1 aspect matching 1024x512)
+// Textured instrument face bounds in aircraft-local coordinates (2:1 aspect matching 2048x1024)
 const PANEL_Z = -1.72;
 const FACE_HALF_W = 0.36;
 const FACE_Y_MIN = 0.12;
 const FACE_Y_MAX = 0.48;
 
-const MAT_TRIM = [0.16, 0.64, 0.0];
-const MAT_CHARCOAL = [0.14, 0.72, 0.0];
-const MAT_LEATHER = [0.22, 0.58, 0.0];
-const MAT_COWL = [0.46, 0.24, 0.0];
-const MAT_ANTIGLARE = [0.08, 0.78, 0.0];
-const MAT_YOKE = [0.22, 0.55, 0.0];
-const MAT_METAL = [0.80, 0.18, 0.0];
+const MAT_TRIM = [0.20, 0.62, 0.0];
+const MAT_CHARCOAL = [0.16, 0.70, 0.0];
+const MAT_LEATHER = [0.24, 0.56, 0.0];
+const MAT_COWL = [0.70, 0.16, 0.0];
+const MAT_ANTIGLARE = [0.22, 0.62, 0.0];
+const MAT_YOKE = [0.24, 0.54, 0.0];
+const MAT_METAL = [0.82, 0.18, 0.0];
 
-const COL_PILLAR = [0.82, 0.78, 0.72];
-const COL_PANEL = [0.13, 0.13, 0.15];
-const COL_GLARESHIELD = [0.09, 0.09, 0.11];
+const COL_PILLAR = [0.125, 0.122, 0.132];
+const COL_PILLAR_TRIM = [0.20, 0.18, 0.17];
+const COL_PANEL = [0.12, 0.125, 0.14];
+const COL_GLARESHIELD = [0.085, 0.088, 0.105];
 const COL_COWL = [0.95, 0.91, 0.82];
-const COL_ANTIGLARE = [0.11, 0.12, 0.14];
-const COL_RED = [0.68, 0.12, 0.11];
-const COL_YOKE = [0.06, 0.06, 0.075];
-const COL_YOKE_ACCENT = [0.18, 0.19, 0.22];
+const COL_ANTIGLARE = [0.10, 0.105, 0.12];
+const COL_RED = [0.74, 0.14, 0.12];
+const COL_YOKE = [0.065, 0.068, 0.08];
+const COL_YOKE_ACCENT = [0.22, 0.23, 0.26];
 
 function createCockpitBuilder() {
   const pos = [];
@@ -141,29 +142,35 @@ function createCockpitBuilder() {
   return { pushVert, triFlat, quadFlat, addBox, addTube, toMesh };
 }
 
-/** Build the exterior nose cowling visible out the bottom of the windshield (main depth pass). */
+/** Build the sculpted exterior nose cowling visible out the bottom of the windshield. */
 export function buildCockpitCowlMesh() {
   const b = createCockpitBuilder();
   const cowlStations = [
-    { z: -3.14, rx: 0.26, ryTop: 0.29, yc: 0.04 },
-    { z: -3.02, rx: 0.44, ryTop: 0.39, yc: 0.02 },
-    { z: -2.65, rx: 0.58, ryTop: 0.46, yc: 0.00 },
-    { z: -2.06, rx: 0.64, ryTop: 0.49, yc: -0.01 },
-    { z: -1.88, rx: 0.66, ryTop: 0.51, yc: 0.00 },
+    { z: -3.22, rx: 0.18, ryTop: 0.20, yc: 0.05, bulge: 0.008, collar: true },
+    { z: -3.15, rx: 0.27, ryTop: 0.29, yc: 0.04, bulge: 0.015, collar: true },
+    { z: -3.05, rx: 0.41, ryTop: 0.37, yc: 0.025, bulge: 0.024, collar: false },
+    { z: -2.86, rx: 0.51, ryTop: 0.43, yc: 0.010, bulge: 0.030, collar: false },
+    { z: -2.62, rx: 0.58, ryTop: 0.465, yc: 0.000, bulge: 0.034, collar: false },
+    { z: -2.35, rx: 0.62, ryTop: 0.485, yc: -0.005, bulge: 0.030, collar: false },
+    { z: -2.08, rx: 0.645, ryTop: 0.498, yc: -0.008, bulge: 0.024, collar: false },
+    { z: -1.86, rx: 0.665, ryTop: 0.512, yc: 0.000, bulge: 0.014, collar: false },
   ];
-  const radSteps = 28;
+  const radSteps = 44;
   const grid = [];
   for (let s = 0; s < cowlStations.length; s += 1) {
     const st = cowlStations[s];
     const row = [];
     for (let i = 0; i <= radSteps; i += 1) {
       const theta = ((i / radSteps) * 2 - 1) * (Math.PI * 0.62);
+      const spineBump = Math.exp(-theta * theta * 14.0) * st.bulge;
+      const sideFlute = Math.exp(-Math.pow((Math.abs(theta) - 0.55) / 0.18, 2)) * 0.009;
+      const ry = st.ryTop + spineBump - sideFlute;
       const x = Math.sin(theta) * st.rx;
-      const y = st.yc + Math.cos(theta) * st.ryTop;
-      const nx = Math.sin(theta) / st.rx;
-      const ny = Math.cos(theta) / st.ryTop;
+      const y = st.yc + Math.cos(theta) * ry;
+      const nx = Math.sin(theta) / st.rx + Math.sin(theta * 2) * 0.06;
+      const ny = Math.cos(theta) / ry;
       const nLen = Math.hypot(nx, ny) || 1;
-      row.push({ x, y, z: st.z, nx: nx / nLen, ny: ny / nLen, nz: -0.08, theta });
+      row.push({ x, y, z: st.z, nx: nx / nLen, ny: ny / nLen, nz: s < 3 ? -0.22 : -0.06, theta, collar: st.collar });
     }
     grid.push(row);
   }
@@ -174,10 +181,12 @@ export function buildCockpitCowlMesh() {
       const c1 = grid[s + 1][i + 1];
       const b1 = grid[s + 1][i];
       const thMid = Math.abs(a.theta + d.theta) * 0.5;
-      const isAntiGlare = thMid < 0.44;
-      const isStripe = thMid >= 0.85 && thMid < 1.05;
-      const c = isAntiGlare ? COL_ANTIGLARE : isStripe ? COL_RED : COL_COWL;
-      const m = isAntiGlare ? MAT_ANTIGLARE : MAT_COWL;
+      const isCollar = a.collar && s === 0;
+      const isAntiGlare = !isCollar && thMid < 0.42;
+      const isPin = !isCollar && thMid >= 0.42 && thMid < 0.455;
+      const isStripe = !isCollar && thMid >= 0.84 && thMid < 1.04;
+      const c = isCollar ? [0.76, 0.78, 0.82] : isAntiGlare ? COL_ANTIGLARE : isPin ? [0.58, 0.16, 0.14] : isStripe ? COL_RED : COL_COWL;
+      const m = isCollar ? MAT_METAL : isAntiGlare ? MAT_ANTIGLARE : MAT_COWL;
       b.pushVert(a.x, a.y, a.z, a.nx, a.ny, a.nz, c, m);
       b.pushVert(b1.x, b1.y, b1.z, b1.nx, b1.ny, b1.nz, c, m);
       b.pushVert(c1.x, c1.y, c1.z, c1.nx, c1.ny, c1.nz, c, m);
@@ -189,19 +198,83 @@ export function buildCockpitCowlMesh() {
   return b.toMesh();
 }
 
-/** Build the cockpit interior structure (panel surround, glareshield, windshield pillars). */
+/** Add a tapered, chamfered upholstered windshield pillar with inward leather highlight edge. */
+function addProfiledPillar(b, p0, p1, w0, d0, w1, d1, sideSign, cMain, cTrim, m) {
+  const segs = 6;
+  const rings = [];
+  // Chamfered 8-vertex profile per ring around local pillar cross-section
+  const prof = [
+    [-1.0, -0.65],
+    [-0.55, -1.0],
+    [0.55, -1.0],
+    [1.0, -0.65],
+    [1.0, 0.65],
+    [0.55, 1.0],
+    [-0.55, 1.0],
+    [-1.0, 0.65],
+  ];
+  for (let s = 0; s <= segs; s += 1) {
+    const t = s / segs;
+    const cx = lerp(p0[0], p1[0], t);
+    const cy = lerp(p0[1], p1[1], t);
+    const cz = lerp(p0[2], p1[2], t);
+    // Subtle lower flare & sleek middle waist
+    const flare = 1.0 + 0.18 * Math.pow(1 - t, 3) + 0.14 * Math.pow(t, 3);
+    const w = lerp(w0, w1, t) * flare;
+    const d = lerp(d0, d1, t) * flare;
+    const r = [];
+    for (let k = 0; k < prof.length; k += 1) {
+      const px = prof[k][0] * w;
+      const pz = prof[k][1] * d;
+      const nLen = Math.hypot(prof[k][0], prof[k][1]) || 1;
+      const innerFace = prof[k][0] * sideSign < -0.35;
+      r.push({
+        x: cx + px,
+        y: cy,
+        z: cz + pz,
+        nx: (prof[k][0] / nLen) * 0.92,
+        ny: 0.14,
+        nz: (prof[k][1] / nLen) * 0.92,
+        trim: innerFace,
+      });
+    }
+    rings.push(r);
+  }
+  for (let s = 0; s < segs; s += 1) {
+    for (let k = 0; k < prof.length; k += 1) {
+      const k2 = (k + 1) % prof.length;
+      const a = rings[s][k];
+      const b1 = rings[s + 1][k];
+      const c1 = rings[s + 1][k2];
+      const d1p = rings[s][k2];
+      const col = (a.trim || d1p.trim) ? cTrim : cMain;
+      b.pushVert(a.x, a.y, a.z, a.nx, a.ny, a.nz, col, m);
+      b.pushVert(b1.x, b1.y, b1.z, b1.nx, b1.ny, b1.nz, col, m);
+      b.pushVert(c1.x, c1.y, c1.z, c1.nx, c1.ny, c1.nz, col, m);
+      b.pushVert(a.x, a.y, a.z, a.nx, a.ny, a.nz, col, m);
+      b.pushVert(c1.x, c1.y, c1.z, c1.nx, c1.ny, c1.nz, col, m);
+      b.pushVert(d1p.x, d1p.y, d1p.z, d1p.nx, d1p.ny, d1p.nz, col, m);
+    }
+  }
+}
+
+/** Build the cockpit interior structure (panel surround, glareshield, dark upholstered pillars). */
 export function buildCockpitFrameMesh() {
   const b = createCockpitBuilder();
 
   // 1. Dark charcoal lower/outer instrument panel surround (covers wide FOV safely)
-  b.addBox(-0.88, -0.05, -1.78, 0.88, 0.468, PANEL_Z - 0.006, COL_PANEL, MAT_CHARCOAL);
+  b.addBox(-0.88, -0.14, -1.78, 0.88, 0.468, PANEL_Z - 0.006, COL_PANEL, MAT_CHARCOAL);
+
+  // Lower knee bolster apron & yoke mount housing (tucked below 6-pack gauges)
+  b.addBox(-0.72, -0.14, -1.75, 0.72, 0.125, -1.66, [0.085, 0.088, 0.10], MAT_LEATHER);
+  b.addBox(-0.072, 0.06, -1.74, 0.072, 0.205, -1.675, [0.09, 0.095, 0.11], MAT_TRIM);
 
   // Side bolsters & lower kick panels
-  b.addBox(-0.88, -0.05, -1.76, -0.68, 0.50, -1.05, [0.16, 0.16, 0.18], MAT_TRIM);
-  b.addBox(0.68, -0.05, -1.76, 0.88, 0.50, -1.05, [0.16, 0.16, 0.18], MAT_TRIM);
+  b.addBox(-0.88, -0.05, -1.76, -0.68, 0.50, -0.82, [0.13, 0.13, 0.145], MAT_TRIM);
+  b.addBox(0.68, -0.05, -1.76, 0.88, 0.50, -0.82, [0.13, 0.13, 0.145], MAT_TRIM);
 
   // 2. Curved padded glareshield overhanging the panel top
-  const gsSegs = 20;
+  const gsSegs = 24;
   for (let i = 0; i < gsSegs; i += 1) {
     const t0 = (i / gsSegs) * 2 - 1;
     const t1 = ((i + 1) / gsSegs) * 2 - 1;
@@ -209,16 +282,20 @@ export function buildCockpitFrameMesh() {
     const x1 = t1 * 0.72;
     const y0 = 0.486 - t0 * t0 * 0.042;
     const y1 = 0.486 - t1 * t1 * 0.042;
-    b.quadFlat(x0, y0 - 0.015, -1.66, x1, y1 - 0.015, -1.66, x1, y1, -1.69, x0, y0, -1.69, COL_GLARESHIELD, MAT_LEATHER);
+    b.quadFlat(x0, y0 - 0.015, -1.65, x1, y1 - 0.015, -1.65, x1, y1, -1.69, x0, y0, -1.69, COL_GLARESHIELD, MAT_LEATHER);
     b.quadFlat(x0, y0, -1.69, x1, y1, -1.69, x1, y1 - 0.008, -1.88, x0, y0 - 0.008, -1.88, COL_GLARESHIELD, MAT_LEATHER);
-    b.quadFlat(x0, y0 - 0.025, -1.72, x1, y1 - 0.025, -1.72, x1, y1 - 0.015, -1.66, x0, y0 - 0.015, -1.66, [0.06, 0.06, 0.07], MAT_CHARCOAL);
+    b.quadFlat(x0, y0 - 0.025, -1.72, x1, y1 - 0.025, -1.72, x1, y1 - 0.015, -1.65, x0, y0 - 0.015, -1.65, [0.055, 0.058, 0.07], MAT_CHARCOAL);
   }
 
-  // 3. Windshield frame: Left A-pillar, Right A-pillar, off-center divider strut, and upper roof brow
-  b.addTube([-0.49, 0.43, -1.76], [-0.41, 0.90, -1.48], 0.036, 0.044, 10, COL_PILLAR, MAT_TRIM);
-  b.addTube([0.49, 0.43, -1.76], [0.41, 0.90, -1.48], 0.036, 0.044, 10, COL_PILLAR, MAT_TRIM);
-  b.addTube([0.165, 0.46, -1.78], [0.215, 0.89, -1.50], 0.014, 0.018, 8, [0.24, 0.24, 0.26], MAT_TRIM);
-  b.addBox(-0.62, 0.85, -1.56, 0.62, 0.95, -1.24, [0.26, 0.25, 0.24], MAT_TRIM);
+  // 3. Dark upholstered contoured A-pillars, base boots, roof gussets, center brace, and headliner
+  addProfiledPillar(b, [-0.63, 0.42, -1.75], [-0.53, 0.90, -1.46], 0.042, 0.052, 0.031, 0.038, -1, COL_PILLAR, COL_PILLAR_TRIM, MAT_LEATHER);
+  addProfiledPillar(b, [0.63, 0.42, -1.75], [0.53, 0.90, -1.46], 0.042, 0.052, 0.031, 0.038, 1, COL_PILLAR, COL_PILLAR_TRIM, MAT_LEATHER);
+  // Dark anodized off-center windshield divider brace (profiled strap, no grey tube)
+  addProfiledPillar(b, [0.175, 0.46, -1.78], [0.22, 0.89, -1.49], 0.012, 0.018, 0.010, 0.015, 1, [0.095, 0.095, 0.11], [0.16, 0.16, 0.18], MAT_TRIM);
+  // Upholstered upper roof header & sun-visor trim
+  b.addBox(-0.62, 0.845, -1.56, 0.62, 0.95, -1.24, [0.135, 0.13, 0.14], MAT_LEATHER);
+  b.addBox(-0.52, 0.835, -1.55, -0.14, 0.86, -1.42, [0.09, 0.09, 0.105], MAT_CHARCOAL);
+  b.addBox(0.14, 0.835, -1.55, 0.52, 0.86, -1.42, [0.09, 0.09, 0.105], MAT_CHARCOAL);
 
   return b.toMesh();
 }
@@ -244,37 +321,43 @@ export function buildCockpitFaceMesh() {
   return b.toMesh();
 }
 
-/** Build the twin-grip Cessna-style control yoke centered around origin (mounted in front of panel). */
+/** Build the twin-grip Cessna-style control yoke centered around origin (mounted clearly visible in lower-center). */
 export function buildYokeMesh() {
   const b = createCockpitBuilder();
-  // Steering shaft extending forward into panel
-  b.addTube([0, 0, 0.02], [0, -0.02, -0.26], 0.022, 0.022, 12, COL_YOKE_ACCENT, MAT_METAL);
-  // Center hub housing
-  b.addBox(-0.044, -0.036, -0.015, 0.044, 0.034, 0.032, COL_YOKE, MAT_YOKE);
-  // Subtle emblem plate on hub
-  b.addBox(-0.024, -0.012, 0.032, 0.024, 0.016, 0.036, [0.22, 0.21, 0.20], MAT_METAL);
+  // Polished stainless steering column shaft + ribbed rubber boot collar extending into panel
+  b.addTube([0, 0, 0.012], [0, -0.012, -0.34], 0.019, 0.019, 14, [0.68, 0.70, 0.74], MAT_METAL);
+  b.addTube([0, -0.004, -0.08], [0, -0.009, -0.20], 0.025, 0.025, 12, [0.10, 0.10, 0.12], MAT_YOKE);
+  // Center hub housing + satin-silver bezel & warm gold wing crest emblem
+  b.addBox(-0.044, -0.027, -0.016, 0.044, 0.027, 0.030, [0.105, 0.11, 0.128], MAT_YOKE);
+  b.addBox(-0.032, -0.017, 0.030, 0.032, 0.017, 0.034, [0.46, 0.48, 0.53], MAT_METAL);
+  b.addBox(-0.022, -0.009, 0.034, 0.022, 0.009, 0.037, [0.86, 0.68, 0.24], MAT_METAL);
 
-  // Sweeping lower crossbar + twin left/right upright grips
+  // Sculpted twin-grip wheel: sweeping lower arms + brushed spoke accents + contoured grips & metallic caps
+  const gripCol = [0.12, 0.125, 0.145];
   for (const side of [-1, 1]) {
-    b.addTube([side * 0.036, -0.015, 0.008], [side * 0.105, -0.005, 0.010], 0.015, 0.015, 10, COL_YOKE, MAT_YOKE);
-    b.addTube([side * 0.105, -0.005, 0.010], [side * 0.118, 0.055, 0.016], 0.016, 0.016, 10, COL_YOKE, MAT_YOKE);
-    b.addTube([side * 0.118, 0.055, 0.016], [side * 0.110, 0.095, 0.014], 0.014, 0.014, 10, COL_YOKE, MAT_YOKE);
+    b.addTube([side * 0.035, -0.012, 0.008], [side * 0.110, -0.016, 0.012], 0.0135, 0.0135, 10, gripCol, MAT_YOKE);
+    b.addTube([side * 0.042, -0.010, 0.020], [side * 0.095, -0.014, 0.022], 0.0055, 0.0055, 8, [0.52, 0.54, 0.59], MAT_METAL);
+    b.addTube([side * 0.110, -0.016, 0.012], [side * 0.126, 0.018, 0.017], 0.0145, 0.0145, 10, gripCol, MAT_YOKE);
+    b.addTube([side * 0.126, 0.018, 0.017], [side * 0.118, 0.050, 0.014], 0.0135, 0.0135, 10, gripCol, MAT_YOKE);
+    b.addBox(side * 0.118 - 0.010, 0.046, 0.004, side * 0.118 + 0.010, 0.056, 0.024, [0.44, 0.46, 0.51], MAT_METAL);
   }
   return b.toMesh();
 }
 
-/** Create the 1024x512 live Canvas instrument texture updater. */
+/** Create the 2048x1024 live Canvas instrument texture updater (2x scaled vector coordinate space). */
 export function createCockpitGaugeRenderer() {
   const canvas = document.createElement('canvas');
-  canvas.width = 1024;
-  canvas.height = 512;
+  canvas.width = 2048;
+  canvas.height = 1024;
   const ctx = canvas.getContext('2d');
 
-  // Pre-build static charcoal panel background with warm sunset top gradient & subtle noise grain
+  // Pre-build static brushed charcoal panel background at native 2048x1024 resolution
   const bgCanvas = document.createElement('canvas');
-  bgCanvas.width = 1024;
-  bgCanvas.height = 512;
+  bgCanvas.width = 2048;
+  bgCanvas.height = 1024;
   const bctx = bgCanvas.getContext('2d');
+  bctx.save();
+  bctx.scale(2, 2);
 
   const panelGrad = bctx.createLinearGradient(0, 0, 0, 512);
   panelGrad.addColorStop(0.0, '#3a2e28'); // Warm sunlit top edge under glareshield
@@ -284,6 +367,12 @@ export function createCockpitGaugeRenderer() {
   bctx.fillStyle = panelGrad;
   bctx.fillRect(0, 0, 1024, 512);
 
+  // Subtle horizontal brushed-aluminum grain across the panel
+  bctx.fillStyle = 'rgba(255, 255, 255, 0.018)';
+  for (let gy = 2; gy < 512; gy += 3) {
+    if ((gy * 7) % 11 < 4) bctx.fillRect(0, gy, 1024, 0.8);
+  }
+
   // Subtle warm sunset key light wash from upper-left (sun direction)
   const sunWash = bctx.createRadialGradient(220, 40, 20, 280, 90, 540);
   sunWash.addColorStop(0, 'rgba(255, 178, 96, 0.20)');
@@ -292,10 +381,122 @@ export function createCockpitGaugeRenderer() {
   bctx.fillStyle = sunWash;
   bctx.fillRect(0, 0, 1024, 512);
 
-  // Subtle panel bevel lines & decorative avionics stack on right side
-  bctx.strokeStyle = 'rgba(255, 220, 175, 0.08)';
-  bctx.lineWidth = 2;
-  bctx.strokeRect(210, 16, 590, 354);
+  // Machined 6-pack center plate & corner rivets
+  bctx.strokeStyle = 'rgba(255, 220, 175, 0.12)';
+  bctx.lineWidth = 1.8;
+  bctx.strokeRect(204, 14, 602, 356);
+  const drawScrew = (sx, sy, rad = 3.2) => {
+    bctx.beginPath();
+    bctx.arc(sx, sy, rad, 0, Math.PI * 2);
+    bctx.fillStyle = '#484b54';
+    bctx.fill();
+    bctx.strokeStyle = 'rgba(0, 0, 0, 0.65)';
+    bctx.lineWidth = 0.9;
+    bctx.stroke();
+    bctx.beginPath();
+    bctx.moveTo(sx - rad * 0.55, sy - rad * 0.45);
+    bctx.lineTo(sx + rad * 0.55, sy + rad * 0.45);
+    bctx.strokeStyle = 'rgba(18, 20, 24, 0.85)';
+    bctx.lineWidth = 1.0;
+    bctx.stroke();
+  };
+  for (const [sx, sy] of [[214, 24], [796, 24], [214, 360], [796, 360], [34, 24], [186, 24], [34, 360], [186, 360]]) {
+    drawScrew(sx, sy, 3.3);
+  }
+
+  // Lower-panel detail (eliminates dead dark lower area): engraved placards, switches, breakers & engine trim
+  const drawSubPanel = (x, y, w, h) => {
+    bctx.fillStyle = '#14161b';
+    bctx.beginPath();
+    bctx.roundRect(x, y, w, h, 8);
+    bctx.fill();
+    bctx.strokeStyle = 'rgba(255, 214, 168, 0.14)';
+    bctx.lineWidth = 1.3;
+    bctx.stroke();
+    drawScrew(x + 9, y + 9, 2.7);
+    drawScrew(x + w - 9, y + 9, 2.7);
+    drawScrew(x + 9, y + h - 9, 2.7);
+    drawScrew(x + w - 9, y + h - 9, 2.7);
+  };
+
+  // Lower-left sub-panel: Engraved placards + illuminated electrical rocker switches
+  drawSubPanel(24, 380, 398, 118);
+  bctx.fillStyle = '#0d0f13';
+  bctx.fillRect(42, 392, 362, 24);
+  bctx.strokeStyle = 'rgba(245, 182, 66, 0.35)';
+  bctx.lineWidth = 1;
+  bctx.strokeRect(42, 392, 362, 24);
+  bctx.font = '700 10px ui-monospace, monospace';
+  bctx.fillStyle = '#e8d7b8';
+  bctx.textAlign = 'center';
+  bctx.textBaseline = 'middle';
+  bctx.fillText('SKYWARD PA-18  •  VNE 155 KT  •  VS0 45 KT  •  NORM OPS ONLY', 223, 404);
+
+  const switches = [
+    ['MSTR', true, '#ef4d44'],
+    ['ALT', true, '#f5b642'],
+    ['AVN', true, '#f5b642'],
+    ['NAV', true, '#64e29a'],
+    ['STRB', true, '#f5b642'],
+    ['LDG', false, '#f5b642'],
+  ];
+  for (let i = 0; i < switches.length; i += 1) {
+    const [lbl, on, ledCol] = switches[i];
+    const bx = 56 + i * 56;
+    const by = 434;
+    bctx.fillStyle = '#1d2027';
+    bctx.fillRect(bx, by, 38, 42);
+    bctx.strokeStyle = 'rgba(255, 255, 255, 0.18)';
+    bctx.strokeRect(bx, by, 38, 42);
+    // Switch rocker paddle + status LED
+    bctx.fillStyle = on ? '#2d313c' : '#16181d';
+    bctx.fillRect(bx + 6, by + (on ? 6 : 16), 26, 20);
+    bctx.beginPath();
+    bctx.arc(bx + 19, by + 11, 3.0, 0, Math.PI * 2);
+    bctx.fillStyle = on ? ledCol : '#3a2b28';
+    bctx.fill();
+    bctx.font = '700 9px ui-monospace, monospace';
+    bctx.fillStyle = '#b4bcc8';
+    bctx.fillText(lbl, bx + 19, by + 52);
+  }
+
+  // Lower-right sub-panel: Circuit breakers + Checklist placard + Bus readout
+  drawSubPanel(602, 380, 402, 118);
+  bctx.fillStyle = '#0d0f13';
+  bctx.fillRect(620, 392, 366, 24);
+  bctx.strokeStyle = 'rgba(245, 182, 66, 0.35)';
+  bctx.strokeRect(620, 392, 366, 24);
+  bctx.font = '700 10px ui-monospace, monospace';
+  bctx.fillStyle = '#f5b642';
+  bctx.textAlign = 'center';
+  bctx.fillText('LANDING: RWY 36 HDG 360° • 55–70 KT • VSI -100 TO -600 FPM', 803, 404);
+
+  const breakers = ['ALT', 'COM', 'NAV', 'XPDR', 'INST', 'FLAP', 'STRB'];
+  for (let i = 0; i < breakers.length; i += 1) {
+    const cx = 640 + i * 44;
+    const cy = 446;
+    bctx.beginPath();
+    bctx.arc(cx, cy, 10, 0, Math.PI * 2);
+    bctx.fillStyle = '#262932';
+    bctx.fill();
+    bctx.strokeStyle = 'rgba(255, 255, 255, 0.28)';
+    bctx.lineWidth = 1.2;
+    bctx.stroke();
+    bctx.beginPath();
+    bctx.arc(cx, cy, 5, 0, Math.PI * 2);
+    bctx.fillStyle = '#121318';
+    bctx.fill();
+    bctx.font = '700 8.5px ui-monospace, monospace';
+    bctx.fillStyle = '#9aa3b2';
+    bctx.fillText(breakers[i], cx, cy + 19);
+  }
+  bctx.font = '700 10px ui-monospace, monospace';
+  bctx.fillStyle = '#8fd0a8';
+  bctx.textAlign = 'right';
+  bctx.fillText('28.4V BUS OK', 986, 486);
+  bctx.textAlign = 'left';
+  bctx.fillStyle = '#b4bcc8';
+  bctx.fillText('OIL 184°F • EGT 1320°F', 620, 486);
 
   // Right-side radio/nav stack aesthetic (matching ref-cockpit layout)
   bctx.fillStyle = '#121317';
@@ -365,6 +566,7 @@ export function createCockpitGaugeRenderer() {
     [116, 126, R_AUX],
   ];
   for (const [cx, cy, rad] of centers) drawBezel(cx, cy, rad);
+  bctx.restore();
 
   function beginDial(cx, cy, r) {
     ctx.save();
@@ -812,7 +1014,10 @@ export function createCockpitGaugeRenderer() {
   }
 
   function update(state, isTitle) {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.drawImage(bgCanvas, 0, 0);
+    ctx.save();
+    ctx.scale(2, 2);
     const p = state.plane;
     const kts = p.speed * 1.94384;
     const altFt = p.pos.y * 3.28084;
@@ -836,6 +1041,7 @@ export function createCockpitGaugeRenderer() {
     drawVsi(705, 282, R, fpm);
     drawFuelAux(116, 126, R_AUX, p.fuel, state.mode === MODE_FREE);
 
+    ctx.restore();
     return canvas;
   }
 

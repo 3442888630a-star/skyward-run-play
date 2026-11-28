@@ -26,13 +26,39 @@ const COL_DARK_METAL = [0.22, 0.23, 0.26];
 const COL_TIRE = [0.09, 0.09, 0.11];
 const COL_ANTIGLARE = [0.11, 0.12, 0.14];
 
-export const PLANE_NAV_LIGHTS = [
+export const PLANE_NAV_LIGHTS_PROCEDURAL = [
   { x: -5.22, y: 1.15, z: -0.58, color: [1.0, 0.16, 0.12], size: 0.22, pulse: 0 },
   { x: 5.22, y: 1.15, z: -0.58, color: [0.18, 1.0, 0.38], size: 0.22, pulse: 0 },
   { x: 0.0, y: 0.26, z: 4.20, color: [1.0, 0.96, 0.88], size: 0.18, pulse: 0 },
   { x: 0.0, y: 1.90, z: 3.88, color: [1.0, 0.18, 0.10], size: 0.24, pulse: 1 },
   { x: 0.0, y: -0.26, z: -3.09, color: [1.0, 0.94, 0.78], size: 0.28, pulse: 0 },
 ];
+
+// Nav light positions matching transformed plane.glb bounds (vertical fin peak at glTF x=3.04, y=2.05)
+export const PLANE_NAV_LIGHTS = [
+  { x: -5.49, y: 1.27, z: -0.14, color: [1.0, 0.16, 0.12], size: 0.22, pulse: 0 },
+  { x: 5.49, y: 1.27, z: -0.14, color: [0.18, 1.0, 0.38], size: 0.22, pulse: 0 },
+  { x: 0.0, y: 0.55, z: 3.55, color: [1.0, 0.96, 0.88], size: 0.18, pulse: 0 },
+  { x: 0.0, y: 2.35, z: 3.04, color: [1.0, 0.18, 0.10], size: 0.24, pulse: 1 },
+  { x: 0.0, y: 0.05, z: -3.50, color: [1.0, 0.94, 0.78], size: 0.28, pulse: 0 },
+];
+
+/**
+ * Column-major 4x4 transform aligning plane.glb (glTF +Y up, nose -X, wingspan +/-Z, gear bottom y=-1.85)
+ * to engine local coordinates (nose -Z, +X right wing, +Y up, gear bottom y=-1.55):
+ * -90 deg rotation around Y: (x, y, z) -> (-z, y, x), plus +0.30 m Y translation.
+ */
+export const PLANE_GLB_TRANSFORM = new Float32Array([
+  0, 0, 1, 0,
+  0, 1, 0, 0,
+  -1, 0, 0, 0,
+  0, 0.30, 0, 1,
+]);
+
+/** Identify propeller nodes in plane.glb (PROP_Hub, PROP_Spinner, PROP_Blade_*, PROP_BladeTip_*). */
+export function isPropPart(name) {
+  return typeof name === 'string' && name.startsWith('PROP_');
+}
 
 function createPlaneBuilder() {
   const pos = [];

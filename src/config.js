@@ -96,17 +96,17 @@ export const PLANE = {
 };
 
 /**
- * 8-ring mission course forming a scenic golden-hour loop across all world zones:
- * farmland, western mountains, wetland shore, northern lake, dense forest, town,
- * river bend, and back onto final approach for Runway 36.
+ * 8-ring mission course forming a scenic golden-hour loop across the grand multi-landform world:
+ * valley gate, joined alpine ridge, glacier cirque lake, Mirror Lake, highland tarn, Eagle Gorge
+ * (plateau canyon), River Canyon, and Final 36 onto Runway 36.
  */
 export const MISSION_RINGS = [
-  { x: 0, y: 155, z: 1020, heading: 0, label: 'Farmland Plain' },
-  { x: -2100, y: 295, z: -250, heading: -0.65, label: 'West Crags' },
-  { x: -1150, y: 165, z: -2550, heading: 0.75, label: 'Wetland Shore' },
-  { x: 1150, y: 170, z: -2650, heading: 1.65, label: 'Mirror Lake' },
-  { x: 2450, y: 215, z: -750, heading: 2.75, label: 'Emerald Forest' },
-  { x: 1380, y: 175, z: 1220, heading: -2.65, label: 'Oakwood Town' },
+  { x: 0, y: 155, z: 1020, heading: 0, label: 'Valley Gate' },
+  { x: -1950, y: 425, z: -200, heading: -0.58, label: 'Alpine Ridge' },
+  { x: -2320, y: 275, z: -1720, heading: 0.42, label: 'Glacier Tarn' },
+  { x: 420, y: 145, z: -2150, heading: 1.55, label: 'Mirror Lake' },
+  { x: 2880, y: 225, z: -1050, heading: 2.35, label: 'Highland Tarn' },
+  { x: 2298, y: 125, z: 240, heading: -2.75, label: 'Eagle Gorge' },
   { x: 447, y: -62, z: 120, heading: -0.18, label: 'River Canyon' },
   { x: 0, y: 92, z: 1080, heading: 0, label: 'Final 36' },
 ];

@@ -14,6 +14,8 @@ const CANYON_FLOOR_Y = -119;
 const CANYON_BED_Y = -129.5;
 const WATERFALL_Z_TOP = -1352;
 const WATERFALL_Z_BOT = -1302;
+const GLACIER_TARN = { x: -2320, z: -1720, y: 195, rx: 420, rz: 360 };
+const HIGHLAND_TARN = { x: 2880, z: -1050, y: 148, rx: 380, rz: 320 };
 
 const FIELD_ANGLE = 0.24;
 const FIELD_COS = Math.cos(FIELD_ANGLE);
@@ -55,27 +57,50 @@ export function riverHalfWidth(z) {
   return 30 + 16 * Math.sin(z * 0.0029 + 1.1) + widen * 185;
 }
 
+/** Winding Eagle Gorge centerline X in the eastern high plateau (z in [-860, +780]). */
+export function eagleGorgeCenterX(z) {
+  return 2360 - 0.56 * z + 85 * Math.sin(z * 0.0042);
+}
+
 /** Northern lake coastline Z coordinates (south and north shores) at a given X. */
 function lakeCoastZ(x) {
-  const westShelf = smooth01((-1050 - x) / 1100) * 1450;
-  return -1520 + 260 * Math.sin(x * 0.00085 + 0.5) + 130 * Math.cos(x * 0.0019) - westShelf;
+  const westShelf = smooth01((-1050 - x) / 1100) * 950;
+  return -1510 + 220 * Math.sin(x * 0.0009 + 0.5) + 110 * Math.cos(x * 0.0020) - westShelf;
 }
 
 function lakeNorthCoastZ(x) {
-  return -3280 + 180 * Math.sin(x * 0.00095 + 1.1) + 110 * Math.cos(x * 0.0021);
+  return -2740 + 180 * Math.sin(x * 0.0010 + 1.1) + 95 * Math.cos(x * 0.0022);
 }
 
-/** Distance factor inside the northern lake (positive = underwater basin). */
+/** Distance factor inside the compacted Mirror Lake basin (x in ~[-1150..+1550]). */
 function lakeMask(x, z) {
   const coastZ = lakeCoastZ(x);
   const northZ = lakeNorthCoastZ(x);
-  const southFactor = smooth01((coastZ - z) / 340);
-  const northFactor = smooth01((z - northZ) / 380);
-  return southFactor * northFactor;
+  const southFactor = smooth01((coastZ - z) / 300);
+  const northFactor = smooth01((z - northZ) / 340);
+  const eastFade = 1 - smooth01((x - 1120) / 420);
+  const westFade = 1 - smooth01((-1080 - x) / 420);
+  return southFactor * northFactor * eastFade * westFade;
 }
 
-/** Water surface elevation at world (x, z): 0m on northern lake, -124m in canyon & south river. */
+/** Organic circular/elliptical basin mask for elevated alpine/highland tarns. */
+function tarnMask(x, z, spec, phase) {
+  const dx = (x - spec.x) / spec.rx;
+  const dz = (z - spec.z) / spec.rz;
+  const ang = Math.atan2(dz, dx);
+  const rimWarp = 1.0 + 0.14 * Math.sin(ang * 3.0 + phase) + 0.08 * Math.cos(ang * 5.0 - phase * 0.7);
+  const d = Math.hypot(dx, dz) / rimWarp;
+  return 1 - smooth01((d - 0.68) / 0.56);
+}
+
+/** Water surface elevation at world (x, z): Glacier Tarn (195m), Highland Tarn (148m), Mirror Lake (0m), Canyon (-124m). */
 export function waterLevelAt(x, z) {
+  if (Math.hypot(x - GLACIER_TARN.x, z - GLACIER_TARN.z) < 460 && tarnMask(x, z, GLACIER_TARN, 0.6) > 0.02) {
+    return GLACIER_TARN.y;
+  }
+  if (Math.hypot(x - HIGHLAND_TARN.x, z - HIGHLAND_TARN.z) < 480 && tarnMask(x, z, HIGHLAND_TARN, -0.8) > 0.02) {
+    return HIGHLAND_TARN.y;
+  }
   if (z <= WATERFALL_Z_TOP) return WORLD.waterY;
   if (z >= WATERFALL_Z_BOT) return CANYON_WATER_Y;
   return lerp(WORLD.waterY, CANYON_WATER_Y, smooth01((z - WATERFALL_Z_TOP) / (WATERFALL_Z_BOT - WATERFALL_Z_TOP)));
@@ -89,7 +114,8 @@ function ridged2D(x, z, octaves = 4, seed = 89) {
   let weight = 1;
   let norm = 0;
   for (let i = 0; i < octaves; i += 1) {
-    let n = 1 - Math.abs(valueNoise2D(x * freq, z * freq, seed + i * 37) * 2 - 1);
+    const rv = valueNoise2D(x * freq, z * freq, seed + i * 37) * 2 - 1;
+    let n = clamp(1.06 - Math.sqrt(rv * rv + 0.014), 0, 1);
     n = n * n * weight;
     weight = clamp(n * 1.65, 0.22, 1.0);
     sum += n * amp;
@@ -134,26 +160,40 @@ function townFlatten(x, z) {
   return smooth01((dist - 360) / 210);
 }
 
-/** Smoothly blended biome zone weights at world (x, z). */
+/** Smoothly blended biome zone weights at world (x, z) across the multi-landform world. */
 export function sampleZoneWeights(x, z) {
-  const warpX = (fbm2D(x * 0.00032, z * 0.00032, 3, 101) - 0.5) * 440;
-  const warpZ = (fbm2D(x * 0.00032 + 11.7, z * 0.00032 - 5.3, 3, 202) - 0.5) * 440;
+  const warpX = (fbm2D(x * 0.00032, z * 0.00032, 3, 101) - 0.5) * 420;
+  const warpZ = (fbm2D(x * 0.00032 + 11.7, z * 0.00032 - 5.3, 3, 202) - 0.5) * 420;
   const nx = x + warpX;
   const nz = z + warpZ;
 
   const coastZ = lakeCoastZ(x);
-  const northCoastZ = lakeNorthCoastZ(x);
   const lake = lakeMask(x, z);
-  const wetland = smooth01((coastZ + 620 - nz) / 480) * smooth01((nz - (coastZ - 260)) / 320) * smooth01((nx + 1950) / 700) * (1 - lake * 0.85);
-  const westMountain = smooth01((-1100 - nx) / 1000);
-  const northMountain = smooth01((northCoastZ + 180 - nz) / 760) * smooth01((3200 - nx) / 1500);
-  const mountain = clamp(Math.max(westMountain, northMountain), 0, 1);
-  const forest = smooth01((nx - 760) / 850) * smooth01((980 - nz) / 850) * (1 - lake) * (1 - northMountain * 0.7);
+  const wetland = smooth01((coastZ + 520 - nz) / 420) * smooth01((nz - (coastZ - 240)) / 300) * smooth01((nx + 1350) / 520) * (1 - smooth01((nx - 250) / 520)) * (1 - lake * 0.85);
+  // Continuous C-shaped Alpine Cordillera (West + North behind Mirror Lake + NE Spur)
+  const lakeCoveShift = smooth01((-1400 - nz) / 600) * (1 - smooth01((-2700 - nz) / 500)) * 520;
+  const westMountain = smooth01((-740 - lakeCoveShift - nx) / 860);
+  const northMountain = smooth01((-2380 - nz) / 760) * smooth01((4200 - nx) / 1400);
+  const neSpur = smooth01((nx - 1580) / 880) * smooth01((-1340 - nz) / 880);
+  const mountain = clamp(Math.max(westMountain, northMountain, neSpur), 0, 1);
+
+  // East High Sandstone Plateau & Forested Ridges
+  const mesaW = smooth01((nx - 1580) / 360);
+  const mesaN = smooth01((nz - (-720)) / 360);
+  const mesaS = 1 - smooth01((nz - 2550) / 520);
+  const plateau = clamp(mesaW * mesaN * mesaS, 0, 1);
+  const forest = smooth01((nx - 620) / 720) * smooth01((1650 - nz) / 850) * (1 - lake) * (1 - northMountain * 0.65);
+
+  // Rolling southern/outer hills shrink the flat valley strictly to the Runway-Village-Oakwood core
+  const hillOutX = smooth01((Math.abs(x) - 540) / 420);
+  const hillSouthZ = smooth01((z - 1900) / 480);
+  const hills = clamp(Math.max(hillOutX * smooth01((z - 320) / 520), hillSouthZ), 0, 1) * (1 - mountain) * (1 - plateau * 0.7);
+
   const town = 1 - townFlatten(x, z);
   const airport = 1 - airfieldFlatten(x, z);
-  const used = clamp(lake + wetland * 0.8 + mountain + forest + town + airport, 0, 1);
-  const farmland = clamp(1 - used * 0.82, 0, 1);
-  return { farmland, forest, lake, wetland, mountain, town, airport };
+  const used = clamp(lake + wetland * 0.8 + mountain + plateau + hills * 0.85 + forest * 0.75 + town * 0.4 + airport * 0.4, 0, 1);
+  const farmland = clamp(1 - used * 0.92, 0, 1);
+  return { farmland, forest, lake, wetland, mountain, plateau, hills, town, airport };
 }
 
 /** Deterministic terrain height in meters at world (x, z). */
@@ -162,50 +202,99 @@ export function terrainHeight(x, z) {
   const nDetail = fbm2D(x * 0.0022 - 4.2, z * 0.0022 + 9.4, 3, 53);
   const zones = sampleZoneWeights(x, z);
 
-  // Rolling central valley + distant world-edge hills
-  const valleyDist = Math.abs(x) / 2600;
+  // Compact central farm valley + rolling world-edge & outer hills
+  const valleyDist = Math.abs(x) / 2200;
   const edgeDist = Math.max(Math.abs(x), Math.abs(z)) / WORLD.half;
   const ridgeNoise = 1 - Math.abs(fbm2D(x * 0.00075 + 3.7, z * 0.00075 - 5.2, 4, 79) * 2 - 1);
-  const outerRim = Math.pow(clamp(edgeDist - 0.62, 0, 1) * 2.6, 1.7) * (145 + ridgeNoise * 110);
-  const hillShape = Math.pow(clamp(valleyDist, 0, 1.5), 1.4) * 52 + outerRim;
+  const hillRidge = ridged2D(x * 0.00095 - 3.1, z * 0.00095 + 4.4, 3, 193);
+  const outerRim = Math.pow(clamp(edgeDist - 0.60, 0, 1) * 2.5, 1.65) * (155 + ridgeNoise * 120);
+  const hillShape = Math.pow(clamp(valleyDist, 0, 1.5), 1.45) * 64 + outerRim;
 
-  // Approach corridor south of Runway 36 stays gently low
-  const approachCorridor = 1 - smooth01(Math.hypot(x * 0.75, Math.max(0, 420 - z) * 0.32 + Math.max(0, z - 2100) * 0.35) / 420);
+  // Approach corridor south of Runway 36 stays gently flat & open
+  const approachCorridor = 1 - smooth01(Math.hypot(x * 0.88, Math.max(0, 420 - z) * 0.35 + Math.max(0, z - 1950) * 0.42) / 360);
 
-  let h = 11 + nBroad * 36 + nDetail * 12 + hillShape * (0.45 + 0.65 * nBroad);
-  h = lerp(h, 14 + nDetail * 4, approachCorridor * 0.74);
+  let h = 11 + nBroad * 30 + nDetail * 11 + hillShape * (0.45 + 0.65 * nBroad);
 
-  // Zone 2: East/NE dense forest rolling hills
-  h += zones.forest * (18 + nBroad * 42 + ridgeNoise * 22);
+  // Rolling Hill Country across South, SW, and SE foothills (replaces endless flat southern plain)
+  if (zones.hills > 0.001) {
+    const rollH = 42 + hillRidge * 155 + nBroad * 58 + ridgeNoise * 38;
+    h += zones.hills * rollH;
+  }
 
-  // Zone 4: West + North/NW snow-capped alpine mountain ranges (2.2-3x peaks, sharp ridgelines)
+  // East High Sandstone Plateau with steep stepped cliff rim (~255-315m)
+  if (zones.plateau > 0.001) {
+    const stepped = clamp(zones.plateau + 0.045 * Math.sin(zones.plateau * Math.PI * 3.0) * zones.plateau * (1 - zones.plateau) * 4.0, 0, 1);
+    const mesaTop = 248 + nBroad * 42 + ridgeNoise * 28 + nDetail * 10;
+    h = lerp(h, mesaTop, stepped);
+  }
+
+  // East/NE forested foothills
+  h += zones.forest * (22 + nBroad * 46 + ridgeNoise * 26) * (1 - zones.plateau * 0.7);
+
+  // Continuous Joined Alpine Mountain System (West + North + NE snow-capped ranges, ~950-1280m)
   if (zones.mountain > 0.001) {
     const mRidge = ridged2D(x * 0.00068 + 2.1, z * 0.00068 - 4.3, 4, 89);
     const mCrest = ridged2D(x * 0.00165 - 1.4, z * 0.00165 + 3.2, 3, 137);
     const mBase = fbm2D(x * 0.00038 + 5.4, z * 0.00038 - 1.9, 3, 43);
-    const farRangeBoost = 1.0 + 0.28 * smooth01((-2350 - x) / 1800) + 0.26 * smooth01((-3600 - z) / 1400);
-    const mHeight = (72 + Math.pow(mRidge, 1.1) * 660 + mCrest * 215 + mBase * 135) * farRangeBoost + nDetail * 14;
+    const farRangeBoost = 1.0 + 0.28 * smooth01((-2350 - x) / 1800) + 0.28 * smooth01((-3300 - z) / 1400);
+    const mHeight = (78 + Math.pow(mRidge, 1.08) * 655 + mCrest * 225 + mBase * 145) * farRangeBoost + nDetail * 14;
     h += zones.mountain * mHeight;
 
-    // Preserve a dramatic alpine pass around Ring 2 (-2100, 295, -250) and legs 1->2 / 2->3
-    const dRing2 = Math.hypot(x - (-2100), z - (-250));
-    const dPass12 = distToSeg2D(x, z, -2100, -250, 0, 1020);
-    const dPass23 = distToSeg2D(x, z, -2100, -250, -1150, -2550);
-    const pass2 = 1 - smooth01((dRing2 - 160) / 340);
-    const pass12 = 1 - smooth01((dPass12 - 140) / 320);
-    const pass23 = 1 - smooth01((dPass23 - 140) / 300);
-    const passFactor = Math.max(pass2, pass12 * 0.92, pass23 * 0.94);
+    // Carve broad U-shaped glacial valleys around Ring 2 (-1950, 425, -200) & flight legs 1->2 / 2->3 / 3->4
+    const dRing2 = Math.hypot(x - (-1950), z - (-200));
+    const dPass12 = distToSeg2D(x, z, -1950, -200, 0, 1020);
+    const dPass23 = distToSeg2D(x, z, -1950, -200, -2320, -1720);
+    const dPass34 = distToSeg2D(x, z, -2320, -1720, -1050, -1980);
+    const pass2 = 1 - smooth01((dRing2 - 260) / 520);
+    const pass12 = 1 - smooth01((dPass12 - 220) / 480);
+    const pass23 = 1 - smooth01((dPass23 - 240) / 520);
+    const pass34 = 1 - smooth01((dPass34 - 240) / 500);
+    const passFactor = Math.max(pass2, pass12 * 0.90, pass23 * 0.90, pass34 * 0.94);
     if (passFactor > 0.001) {
-      const passFloor = 175 + nDetail * 14 - smooth01((-1000 - z) / 1400) * 65 - smooth01((x + 1500) / 600) * 90;
-      h = lerp(h, Math.min(h, passFloor), passFactor * 0.94);
+      const passFloor = 225 + nDetail * 14 - smooth01((x + 1450) / 650) * 165 - smooth01((-1100 - z) / 700) * 55;
+      const k = 50;
+      const diff = clamp(0.5 + 0.5 * (passFloor - h) / k, 0, 1);
+      const sMinFloor = lerp(passFloor, h, diff) - k * diff * (1 - diff);
+      h = lerp(h, sMinFloor, passFactor * 0.90);
     }
   }
 
-  // Zone 3: Low flat marsh/wetland shores + marshy peninsula near (-1150, -2450)
+  // Keep Runway 36 Final Approach corridor gently flat
+  h = lerp(h, 14 + nDetail * 3.5, approachCorridor * 0.85);
+
+  // Carve West Glacier Tarn (y=195m cirque lake) & East Highland Tarn (y=148m mesa lake)
+  const gTarn = tarnMask(x, z, GLACIER_TARN, 0.6);
+  if (gTarn > 0.001) {
+    const cirqueFloor = 176 + nDetail * 4;
+    const cirqueRim = 248 + ridgeNoise * 42;
+    const rimT = smooth01(gTarn / 0.55);
+    const bowlH = lerp(h, Math.min(h, cirqueRim), rimT * 0.65);
+    h = lerp(bowlH, cirqueFloor, gTarn);
+  }
+  const hTarn = tarnMask(x, z, HIGHLAND_TARN, -0.8);
+  if (hTarn > 0.001) {
+    const tarnFloor = 130 + nDetail * 4;
+    const tarnRim = 172 + ridgeNoise * 38;
+    h = lerp(Math.min(h, tarnRim), tarnFloor, hTarn);
+  }
+
+  // Carve Second Canyon Segment: Eagle Gorge slicing across East High Plateau (z in [-860, +1050])
+  const gorgeBand = smooth01((z - (-880)) / 240) * (1 - smooth01((z - 760) / 300));
+  if (gorgeBand > 0.001) {
+    const gDist = Math.abs(x - eagleGorgeCenterX(z));
+    const gFloorHalfW = 46;
+    const gRimHalfW = 158 + 14 * Math.sin(z * 0.005);
+    const rawGT = smooth01((gDist - gFloorHalfW) / (gRimHalfW - gFloorHalfW));
+    const strataGT = clamp(rawGT + 0.042 * Math.sin(rawGT * Math.PI * 4.0), 0, 1);
+    const gorgeFloorY = 34 + (nDetail - 0.5) * 4.5;
+    h = lerp(h, lerp(gorgeFloorY, h, strataGT), gorgeBand);
+  }
+
+  // Zone 3: Low flat marsh/wetland shores + marshy peninsula near (-1150, -2250)
   if (zones.wetland > 0.001) {
     h = lerp(h, 2.2 + nDetail * 3.8, zones.wetland * 0.85);
   }
-  const marshPeninsula = 1 - smooth01((Math.hypot(x - (-1150), z - (-2450)) - 220) / 340);
+  const marshPeninsula = 1 - smooth01((Math.hypot(x - (-1050), z - (-2200)) - 200) / 300);
 
   // Carve continuous winding river + center-north Grand Canyon along riverCenterX(z)
   const rCenter = riverCenterX(z);
@@ -242,11 +331,19 @@ export function terrainHeight(x, z) {
   }
   h = lerp(hRiver, hCanyon, canyonBlend);
 
-  // Carve large northern lake (preserving marshy peninsula around Ring 3 shore)
-  const outletShield = smooth01((z - (WATERFALL_Z_TOP - 80)) / 90) * smooth01((rDist - 68) / 85);
+  // Carve compacted Mirror Lake (preserving marshy peninsula & rocky waterfall outlet chutes)
+  const outletShield = smooth01((z - (WATERFALL_Z_TOP - 95)) / 70) * smooth01((rDist - 46) / 36);
   const lMask = lakeMask(x, z) * (1 - marshPeninsula * 0.92) * (1 - outletShield);
   if (lMask > 0) {
     h = lerp(h, -14, lMask);
+  }
+  // Natural canyon-lip rock shoulders flanking the waterfall mouth so lake water laps solid shore instead of ending in mid-air
+  const lipZMask = smooth01((z - (-1425)) / 52) * (1 - smooth01((z - (-1352)) / 24));
+  const shoulderXMask = smooth01((rDist - 46) / 22) * (1 - smooth01((rDist - 135) / 45));
+  const lipShoulder = lipZMask * shoulderXMask;
+  if (lipShoulder > 0.001) {
+    const sillH = 3.2 + nDetail * 3.8 + Math.sin(x * 0.08) * 1.4;
+    h = Math.max(h, lerp(h, sillH, lipShoulder));
   }
   if (marshPeninsula > 0.01) {
     h = lerp(h, 2.4 + nDetail * 2.2, marshPeninsula * 0.88);
@@ -261,7 +358,7 @@ export function terrainHeight(x, z) {
   h = lerp(34, h, padFlatten(x, z, 575, 560, 28, 36));
   h = lerp(42, h, padFlatten(x, z, 245, 2860, 28, 32));
 
-  // Level Southeast Town plateau gently at 24m
+  // Level Southeast Oakwood Town plateau gently at 24m (protected from plateau cliffs)
   const tf = townFlatten(x, z);
   h = lerp(24, h, tf);
 
@@ -810,15 +907,34 @@ export function buildGroundTextureCanvas() {
         b = lerp(b, wB, zones.wetland * 0.85);
       }
 
-      // Zone 4: West hills & mountains (rocky slate/granite & dry alpine turf)
+      // Zone 4: West/North mountains & alpine ridges (grass-green -> dry brown earth)
       if (zones.mountain > 0.001) {
-        const rock = smooth01((y - 72) / 65);
-        const mR = lerp(0.68, 0.72, rock);
-        const mG = lerp(0.66, 0.65, rock);
-        const mB = lerp(0.46, 0.58, rock);
-        r = lerp(r, mR, zones.mountain * 0.84);
-        g = lerp(g, mG, zones.mountain * 0.84);
-        b = lerp(b, mB, zones.mountain * 0.84);
+        const dry = smooth01((y - 55) / 85);
+        const mR = lerp(0.46, 0.66, dry);
+        const mG = lerp(0.58, 0.56, dry);
+        const mB = lerp(0.32, 0.44, dry);
+        r = lerp(r, mR, zones.mountain * 0.86);
+        g = lerp(g, mG, zones.mountain * 0.86);
+        b = lerp(b, mB, zones.mountain * 0.86);
+      }
+
+      // Zone 5: East High Sandstone Plateau (warm sage-ochre mesa top) & Rolling Foothills
+      if (zones.plateau > 0.001) {
+        const pR = lerp(0.56, 0.72, nBio);
+        const pG = lerp(0.58, 0.60, nBio);
+        const pB = lerp(0.34, 0.40, nBio);
+        r = lerp(r, pR, zones.plateau * 0.82);
+        g = lerp(g, pG, zones.plateau * 0.82);
+        b = lerp(b, pB, zones.plateau * 0.82);
+      }
+      if (zones.hills > 0.001) {
+        const hDry = smooth01((y - 75) / 110);
+        const hR = lerp(0.48, 0.68, hDry);
+        const hG = lerp(0.62, 0.58, hDry);
+        const hB = lerp(0.32, 0.38, hDry);
+        r = lerp(r, hR, zones.hills * 0.78);
+        g = lerp(g, hG, zones.hills * 0.78);
+        b = lerp(b, hB, zones.hills * 0.78);
       }
 
       // Zone 6 & 7: Town & Airfield neat mowed green turf
@@ -845,9 +961,9 @@ export function buildGroundTextureCanvas() {
       const sandMix = 1 - smooth01((relY - 0.35) / 3.2);
       if (sandMix > 0.001) {
         const wet = 1 - smooth01((relY + 0.3) / 1.2);
-        r = lerp(r, lerp(0.84, 0.50, wet), sandMix * 0.88);
-        g = lerp(g, lerp(0.76, 0.44, wet), sandMix * 0.88);
-        b = lerp(b, lerp(0.56, 0.34, wet), sandMix * 0.88);
+        r = lerp(r, lerp(0.84, 0.64, wet), sandMix * 0.86);
+        g = lerp(g, lerp(0.76, 0.58, wet), sandMix * 0.86);
+        b = lerp(b, lerp(0.56, 0.48, wet), sandMix * 0.86);
       }
 
       // Keep high alpine slopes & steep canyon cliffs neutral so photo rock/snowrock/snow read cleanly
@@ -860,6 +976,8 @@ export function buildGroundTextureCanvas() {
         b = lerp(b, 0.96, keepNeutral * 0.88);
       }
 
+      // Encode flat lowland farmland mask into alpha? NO: 2D canvas drawImage premultiplies RGB by alpha,
+      // which would zero RGB wherever alpha=0! Keep groundTex alpha=255 and expose buildFarmMaskCanvas() separately.
       const idx = (py * BASE + px) * 4;
       data[idx] = Math.round(clamp(r * shade, 0, 1) * 255);
       data[idx + 1] = Math.round(clamp(g * shade, 0, 1) * 255);
@@ -924,7 +1042,53 @@ export function buildGroundTextureCanvas() {
 }
 
 /**
- * 512x512 seamlessly tileable fine ground detail texture (grass blades, soil grain, rock grit).
+ * 512x512 farmland valley zone mask (RGB = 1 on flat valley plains, 0 on hills/mountains/forest/north).
+ * Kept separate from groundTex so 2D canvas alpha premultiplication never darkens groundTex RGB.
+ */
+export function buildFarmMaskCanvas() {
+  const SIZE = 512;
+  const canvas = makeCanvas(SIZE, SIZE);
+  const ctx = canvas.getContext('2d');
+  const img = ctx.createImageData(SIZE, SIZE);
+  const data = img.data;
+
+  for (let py = 0; py < SIZE; py += 1) {
+    const z = (py / (SIZE - 1) - 0.5) * WORLD.size;
+    for (let px = 0; px < SIZE; px += 1) {
+      const x = (px / (SIZE - 1) - 0.5) * WORLD.size;
+      const y = sampleMeshHeight(x, z);
+      const ny = terrainNormalY(x, z);
+      const zones = sampleZoneWeights(x, z);
+
+      const northExclude = smooth01((z - (-900)) / 420);
+      const southExclude = 1 - smooth01((z - 1950) / 450);
+      const farmZone =
+        smooth01((zones.farmland - 0.34) / 0.42) *
+        (1 - smooth01((zones.mountain - 0.04) / 0.14)) *
+        (1 - smooth01((zones.plateau - 0.06) / 0.16)) *
+        (1 - smooth01((zones.hills - 0.12) / 0.24)) *
+        (1 - smooth01((zones.forest - 0.22) / 0.34)) *
+        (1 - smooth01((zones.wetland - 0.22) / 0.34)) *
+        (1 - smooth01((zones.lake - 0.02) / 0.12)) *
+        northExclude *
+        southExclude;
+      const flatGentle = smooth01((ny - 0.935) / 0.05);
+      const lowAlt = 1 - smooth01((y - 36) / 24);
+      const v = Math.round(clamp(farmZone * flatGentle * lowAlt, 0, 1) * 255);
+
+      const idx = (py * SIZE + px) * 4;
+      data[idx] = v;
+      data[idx + 1] = v;
+      data[idx + 2] = v;
+      data[idx + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return canvas;
+}
+
+/**
+ * 1024x1024 seamlessly tileable fine ground detail texture (grass blades, soil grain, rock grit).
  * Neutral gray (~0.5) so shader can multiply cleanly across terrain & asphalt.
  */
 export function buildDetailTextureCanvas() {
@@ -972,19 +1136,19 @@ export function buildDetailTextureCanvas() {
 
   // Add subtle wrapped grass-blade / pebble strokes for crisp low-altitude detail
   const rand = createRandom(77331);
-  ctx.lineWidth = 1.2;
-  for (let i = 0; i < 1600; i += 1) {
+  ctx.lineWidth = 1.4;
+  for (let i = 0; i < 3200; i += 1) {
     const x = rand() * SIZE;
     const y = rand() * SIZE;
     const ang = rand() * Math.PI * 2;
-    const len = 2.0 + rand() * 3.5;
+    const len = 3.0 + rand() * 5.0;
     const light = rand() > 0.5;
     ctx.strokeStyle = light ? 'rgba(215, 220, 200, 0.16)' : 'rgba(38, 42, 30, 0.18)';
     for (let ox = -1; ox <= 1; ox += 1) {
       for (let oy = -1; oy <= 1; oy += 1) {
         const px = x + ox * SIZE;
         const py = y + oy * SIZE;
-        if (px < -8 || px > SIZE + 8 || py < -8 || py > SIZE + 8) continue;
+        if (px < -10 || px > SIZE + 10 || py < -10 || py > SIZE + 10) continue;
         ctx.beginPath();
         ctx.moveTo(px, py);
         ctx.lineTo(px + Math.cos(ang) * len, py + Math.sin(ang) * len);
@@ -1241,28 +1405,88 @@ export function buildWaterMesh() {
   const steps = 112;
   const stepSize = WORLD.size / steps;
 
-  const emitWaterVert = (x, z, waterY) => {
+  const emitWaterVert = (x, z, waterY, flowMode = 'river') => {
     const h = sampleMeshHeight(x, z);
     const depth = clamp((waterY - h) / 4.8, 0, 1);
-    b.pushVert(x, waterY, z, 0, 1, 0, depth, 0.32, 0.44);
+    let fx = 0.0;
+    let fz = 0.0;
+    if (flowMode === 'river') {
+      const rc = riverCenterX(z);
+      const slopeX = (riverCenterX(z + 20) - riverCenterX(z - 20)) / 40;
+      const len = Math.hypot(slopeX, 1) || 1;
+      const inChannel = 1 - smooth01((Math.abs(x - rc) - 65) / 85);
+      const rushSpeed = lerp(0.46, 0.96, inChannel);
+      fx = (slopeX / len) * rushSpeed;
+      fz = (1 / len) * rushSpeed;
+    } else if (flowMode === 'mirror') {
+      const dx = riverCenterX(WATERFALL_Z_TOP) - x;
+      const dz = (WATERFALL_Z_TOP + 120) - z;
+      const d = Math.hypot(dx, dz) || 1;
+      const pull = lerp(0.14, 0.36, 1 - smooth01((d - 120) / 650));
+      fx = (dx / d) * pull;
+      fz = (dz / d) * pull;
+    } else {
+      fx = 0.14;
+      fz = 0.10;
+    }
+    b.pushVert(x, waterY, z, 0, 1, 0, depth, fx * 0.5 + 0.5, fz * 0.5 + 0.5);
   };
 
-  const emitCell = (x0, x1, z0, z1, waterY) => {
+  const emitCell = (x0, x1, z0, z1, waterY, flowMode = 'river', maxTerrainClear = 5.5) => {
     const cx = (x0 + x1) * 0.5;
     const cz = (z0 + z1) * 0.5;
+    const cornerClear = Math.min(maxTerrainClear, 3.5);
     if (
-      sampleMeshHeight(cx, cz) < waterY + 5.5 ||
-      sampleMeshHeight(x0, z0) < waterY + 3.5 ||
-      sampleMeshHeight(x1, z0) < waterY + 3.5 ||
-      sampleMeshHeight(x0, z1) < waterY + 3.5 ||
-      sampleMeshHeight(x1, z1) < waterY + 3.5
+      sampleMeshHeight(cx, cz) < waterY + maxTerrainClear ||
+      sampleMeshHeight(x0, z0) < waterY + cornerClear ||
+      sampleMeshHeight(x1, z0) < waterY + cornerClear ||
+      sampleMeshHeight(x0, z1) < waterY + cornerClear ||
+      sampleMeshHeight(x1, z1) < waterY + cornerClear
     ) {
-      emitWaterVert(x0, z0, waterY);
-      emitWaterVert(x0, z1, waterY);
-      emitWaterVert(x1, z1, waterY);
-      emitWaterVert(x0, z0, waterY);
-      emitWaterVert(x1, z1, waterY);
-      emitWaterVert(x1, z0, waterY);
+      emitWaterVert(x0, z0, waterY, flowMode);
+      emitWaterVert(x0, z1, waterY, flowMode);
+      emitWaterVert(x1, z1, waterY, flowMode);
+      emitWaterVert(x0, z0, waterY, flowMode);
+      emitWaterVert(x1, z1, waterY, flowMode);
+      emitWaterVert(x1, z0, waterY, flowMode);
+    }
+  };
+
+  // Curved organic lake-outlet lip boundary so Mirror Lake never terminates in a straight ruler line
+  const wfCenterTop = riverCenterX(WATERFALL_Z_TOP);
+  const lakeOutletLipZ = (x) => {
+    const dx = x - wfCenterTop;
+    const mainChute = Math.exp(-Math.pow((dx + 1) / 30, 2));
+    const westChute = Math.exp(-Math.pow((dx + 39) / 16, 2)) * 0.85;
+    const eastChute = Math.exp(-Math.pow((dx - 34) / 14, 2)) * 0.80;
+    const chute = Math.max(mainChute, westChute, eastChute);
+    const wave = 5.5 * Math.sin(x * 0.11 + 0.4) + 3.2 * Math.cos(x * 0.24 - 0.8);
+    return WATERFALL_Z_TOP - 32 + chute * 35 + wave;
+  };
+
+  const emitClippedLakeCell = (x0, x1, z0, z1) => {
+    const clipZ0 = lakeOutletLipZ(x0);
+    const clipZ1 = lakeOutletLipZ(x1);
+    const cz0a = Math.min(z0, clipZ0);
+    const cz1a = Math.min(z1, clipZ0);
+    const cz0b = Math.min(z0, clipZ1);
+    const cz1b = Math.min(z1, clipZ1);
+    if (cz1a - cz0a < 0.25 && cz1b - cz0b < 0.25) return;
+    const cx = (x0 + x1) * 0.5;
+    const cz = ((cz0a + cz1a + cz0b + cz1b) * 0.25);
+    if (
+      sampleMeshHeight(cx, cz) < WORLD.waterY + 1.8 ||
+      sampleMeshHeight(x0, cz0a) < WORLD.waterY + 1.4 ||
+      sampleMeshHeight(x1, cz0b) < WORLD.waterY + 1.4 ||
+      sampleMeshHeight(x0, cz1a) < WORLD.waterY + 1.4 ||
+      sampleMeshHeight(x1, cz1b) < WORLD.waterY + 1.4
+    ) {
+      emitWaterVert(x0, cz0a, WORLD.waterY, 'mirror');
+      emitWaterVert(x0, cz1a, WORLD.waterY, 'mirror');
+      emitWaterVert(x1, cz1b, WORLD.waterY, 'mirror');
+      emitWaterVert(x0, cz0a, WORLD.waterY, 'mirror');
+      emitWaterVert(x1, cz1b, WORLD.waterY, 'mirror');
+      emitWaterVert(x1, cz0b, WORLD.waterY, 'mirror');
     }
   };
 
@@ -1270,158 +1494,327 @@ export function buildWaterMesh() {
     const z0 = -WORLD.half + iz * stepSize;
     const z1 = z0 + stepSize;
     const zMid = (z0 + z1) * 0.5;
-    const inLake = z1 <= WATERFALL_Z_TOP + 24;
+    const inLake = z1 <= WATERFALL_Z_TOP - 45;
     const inRiver = z0 >= WATERFALL_Z_BOT - 12;
     if (!inLake && !inRiver) {
-      // Subdivide transition band near waterfall lip so lake & plunge pool meet cleanly
-      const sub = 4;
+      // Finely subdivide lake-to-waterfall transition band with curved organic lip clipping
+      const sub = 8;
       for (let sz = 0; sz < sub; sz += 1) {
         const az0 = lerp(z0, z1, sz / sub);
         const az1 = lerp(z0, z1, (sz + 1) / sub);
         const azMid = (az0 + az1) * 0.5;
-        if (azMid > WATERFALL_Z_TOP && azMid < WATERFALL_Z_BOT) continue;
-        const wy = azMid <= WATERFALL_Z_TOP ? WORLD.waterY : CANYON_WATER_Y;
         for (let ix = 0; ix < steps; ix += 1) {
           const x0 = -WORLD.half + ix * stepSize;
           const x1 = x0 + stepSize;
-          const nearRiver = Math.abs((x0 + x1) * 0.5 - riverCenterX(azMid)) < 260;
-          if (nearRiver) {
+          const xMid = (x0 + x1) * 0.5;
+          const nearOutlet = Math.abs(xMid - wfCenterTop) < 260;
+          if (nearOutlet) {
             for (let sx = 0; sx < sub; sx += 1) {
-              emitCell(lerp(x0, x1, sx / sub), lerp(x0, x1, (sx + 1) / sub), az0, az1, wy);
+              const ax0 = lerp(x0, x1, sx / sub);
+              const ax1 = lerp(x0, x1, (sx + 1) / sub);
+              const axMid = (ax0 + ax1) * 0.5;
+              const lipZ = lakeOutletLipZ(axMid);
+              if (az0 < lipZ) {
+                emitClippedLakeCell(ax0, ax1, az0, az1);
+              } else if (azMid >= WATERFALL_Z_BOT - 2) {
+                emitCell(ax0, ax1, az0, az1, CANYON_WATER_Y, 'river');
+              }
             }
-          } else {
-            emitCell(x0, x1, az0, az1, wy);
+          } else if (azMid <= WATERFALL_Z_TOP - 2) {
+            emitCell(x0, x1, az0, az1, WORLD.waterY, 'mirror', 2.4);
+          } else if (azMid >= WATERFALL_Z_BOT) {
+            emitCell(x0, x1, az0, az1, CANYON_WATER_Y, 'river');
           }
         }
       }
       continue;
     }
 
-    const waterY = inLake ? WORLD.waterY : CANYON_WATER_Y;
-    const rCenter = riverCenterX(zMid);
-    for (let ix = 0; ix < steps; ix += 1) {
-      const x0 = -WORLD.half + ix * stepSize;
-      const x1 = x0 + stepSize;
-      if (inRiver && Math.abs((x0 + x1) * 0.5 - rCenter) < 240) {
-        // Subdivide river corridor cells 3x3 (~31m) so water sits cleanly inside canyon walls
-        const sub = 3;
-        for (let sz = 0; sz < sub; sz += 1) {
-          const az0 = lerp(z0, z1, sz / sub);
-          const az1 = lerp(z0, z1, (sz + 1) / sub);
-          for (let sx = 0; sx < sub; sx += 1) {
-            emitCell(lerp(x0, x1, sx / sub), lerp(x0, x1, (sx + 1) / sub), az0, az1, waterY);
+      const waterY = inLake ? WORLD.waterY : CANYON_WATER_Y;
+      const flowMode = inLake ? 'mirror' : 'river';
+      const rCenter = riverCenterX(zMid);
+      for (let ix = 0; ix < steps; ix += 1) {
+        const x0 = -WORLD.half + ix * stepSize;
+        const x1 = x0 + stepSize;
+        if (inRiver && Math.abs((x0 + x1) * 0.5 - rCenter) < 240) {
+          // Subdivide river corridor cells (6x6 near plunge pool, 3x3 downstream) so water sits cleanly inside canyon walls
+          const sub = zMid < WATERFALL_Z_BOT + 65 ? 6 : 3;
+          const maxClear = zMid < WATERFALL_Z_BOT + 65 ? 2.2 : 5.5;
+          for (let sz = 0; sz < sub; sz += 1) {
+            const az0 = lerp(z0, z1, sz / sub);
+            const az1 = lerp(z0, z1, (sz + 1) / sub);
+            for (let sx = 0; sx < sub; sx += 1) {
+              emitCell(lerp(x0, x1, sx / sub), lerp(x0, x1, (sx + 1) / sub), az0, az1, waterY, 'river', maxClear);
+            }
           }
+        } else {
+          emitCell(x0, x1, z0, z1, waterY, flowMode);
         }
-      } else {
-        emitCell(x0, x1, z0, z1, waterY);
+      }
+  }
+
+  // Fine water meshes for West Glacier Tarn (y=195m) & East Highland Tarn (y=148m)
+  const emitAlpineTarn = (spec, phase) => {
+    const tSteps = 30;
+    const xMin = spec.x - spec.rx * 1.25;
+    const xMax = spec.x + spec.rx * 1.25;
+    const zMin = spec.z - spec.rz * 1.25;
+    const zMax = spec.z + spec.rz * 1.25;
+    for (let iz = 0; iz < tSteps; iz += 1) {
+      const z0 = lerp(zMin, zMax, iz / tSteps);
+      const z1 = lerp(zMin, zMax, (iz + 1) / tSteps);
+      const zm = (z0 + z1) * 0.5;
+      for (let ix = 0; ix < tSteps; ix += 1) {
+        const x0 = lerp(xMin, xMax, ix / tSteps);
+        const x1 = lerp(xMin, xMax, (ix + 1) / tSteps);
+        const xm = (x0 + x1) * 0.5;
+        if (tarnMask(xm, zm, spec, phase) > 0.02) {
+          emitCell(x0, x1, z0, z1, spec.y, 'tarn');
+        }
+      }
+    }
+  };
+  emitAlpineTarn(GLACIER_TARN, 0.6);
+  emitAlpineTarn(HIGHLAND_TARN, -0.8);
+
+  return b.toMesh();
+}
+
+/** Multi-stream segmented waterfall cascades (7 staggered sub-streams in 3 unequal groups), ragged edges, and curved lake-lip glide. */
+export function buildWaterfallMesh() {
+  const b = createBuilder(true);
+  const cols = 12;
+  const rows = 30;
+
+  // 3 asymmetric cascade groups split into 7 staggered sub-streams (1.5-3m wet-rock gaps, staggered bottom elevations & unequal widths)
+  const streams = [
+    // Main central cascade (3 sub-streams, widest overall ~11 -> 26m halfW span)
+    { xOffTop: -10.5, xOffBot: -19.0, halfWTop: 3.4, halfWBot: 7.8, zLip: WATERFALL_Z_TOP - 20, zBot: WATERFALL_Z_BOT + 10, yBotOff: 2.2, ledge1: 0.31, ledge2: 0.67, weight: 0.96, seed: 0.14 },
+    { xOffTop: -0.5,  xOffBot: -1.5,  halfWTop: 4.3, halfWBot: 9.5, zLip: WATERFALL_Z_TOP - 23, zBot: WATERFALL_Z_BOT + 12, yBotOff: -1.6, ledge1: 0.39, ledge2: 0.74, weight: 1.00, seed: 0.31 },
+    { xOffTop: 9.0,   xOffBot: 16.5,  halfWTop: 3.1, halfWBot: 7.0, zLip: WATERFALL_Z_TOP - 19, zBot: WATERFALL_Z_BOT + 8,  yBotOff: 1.4, ledge1: 0.27, ledge2: 0.62, weight: 0.94, seed: 0.59 },
+    // West cascade (2 sub-streams, medium width ~8.5 -> 13.5m halfW span, ends higher on ledge spray)
+    { xOffTop: -43.5, xOffBot: -57.0, halfWTop: 3.6, halfWBot: 6.2, zLip: WATERFALL_Z_TOP - 15, zBot: WATERFALL_Z_BOT + 4,  yBotOff: 4.8, ledge1: 0.29, ledge2: 0.61, weight: 0.90, seed: 0.48 },
+    { xOffTop: -33.5, xOffBot: -43.5, halfWTop: 3.8, halfWBot: 6.5, zLip: WATERFALL_Z_TOP - 17, zBot: WATERFALL_Z_BOT + 7,  yBotOff: 3.2, ledge1: 0.36, ledge2: 0.70, weight: 0.92, seed: 0.71 },
+    // East cascade (2 sub-streams, narrowest ~6.5 -> 10.5m halfW span)
+    { xOffTop: 29.0,  xOffBot: 39.0,  halfWTop: 3.0, halfWBot: 5.0, zLip: WATERFALL_Z_TOP - 15, zBot: WATERFALL_Z_BOT + 6,  yBotOff: -2.4, ledge1: 0.42, ledge2: 0.77, weight: 0.88, seed: 0.83 },
+    { xOffTop: 37.5,  xOffBot: 50.5,  halfWTop: 2.5, halfWBot: 4.4, zLip: WATERFALL_Z_TOP - 13, zBot: WATERFALL_Z_BOT + 3,  yBotOff: 0.8,  ledge1: 0.34, ledge2: 0.68, weight: 0.85, seed: 0.95 },
+  ];
+
+  for (let si = 0; si < streams.length; si += 1) {
+    const st = streams[si];
+    const samplePt = (u, t) => {
+      const s = u * 2 - 1;
+      // Lengthened rounded lake-mouth glide (t=0..0.24) with curved upstream arc so lip blends smoothly into lake
+      const lipT = smooth01(t / 0.24);
+      const fallT = smooth01((t - 0.19) / 0.81);
+      const zLipOut = WATERFALL_Z_TOP + 5;
+      const lipArc = (1 - s * s) * 3.6;
+      const zBase = t < 0.24
+        ? lerp(st.zLip - lipArc, zLipOut, lipT)
+        : lerp(zLipOut, st.zBot, Math.pow(fallT, 0.86));
+      const cx = riverCenterX(zBase)
+        + lerp(st.xOffTop, st.xOffBot, Math.pow(t, 0.88))
+        + Math.sin(t * 4.8 + st.seed * 8.0) * 2.8
+        + Math.cos(t * 9.6 - st.seed * 5.0) * 1.2;
+      // Independent low-frequency left/right wobble (>=25% half-width) for ragged broken edges
+      const leftWobble = 1.0 + 0.28 * Math.sin(t * 5.2 + st.seed * 7.3) + 0.14 * Math.cos(t * 11.4 + st.seed * 3.1);
+      const rightWobble = 1.0 + 0.28 * Math.cos(t * 4.7 - st.seed * 9.1) + 0.14 * Math.sin(t * 10.8 - st.seed * 4.2);
+      const wobble = lerp(leftWobble, rightWobble, u);
+      const halfW = lerp(st.halfWTop, st.halfWBot, Math.pow(t, 0.78)) * wobble;
+      const archBulge = (1 - s * s) * (2.6 + 6.2 * Math.sin(fallT * Math.PI * 0.74));
+      const ledge1Kick = Math.exp(-Math.pow((t - st.ledge1) / 0.075, 2)) * 3.8;
+      const ledge2Kick = Math.exp(-Math.pow((t - st.ledge2) / 0.075, 2)) * 3.1;
+      const x = cx + s * halfW;
+      const y = t < 0.24
+        ? lerp(WORLD.waterY + 0.12, -3.2, Math.pow(lipT, 1.65))
+        : lerp(-3.2, CANYON_WATER_Y - 1.2 + st.yBotOff, Math.pow(fallT, 1.08));
+      const z = zBase + archBulge + ledge1Kick + ledge2Kick;
+      const ledgeFoam = clamp((ledge1Kick + ledge2Kick) / 2.6 + (1 - Math.abs(t - 0.26) * 5.2) * 0.45, 0, 1);
+      return {
+        x,
+        y,
+        z,
+        nx: s * 0.30,
+        ny: lerp(0.86, 0.16, smooth01(t * 1.35)),
+        nz: lerp(0.44, 0.94, smooth01(t * 1.35)),
+        ledgeFoam,
+      };
+    };
+
+    for (let r = 0; r < rows; r += 1) {
+      const t0 = r / rows;
+      const t1 = (r + 1) / rows;
+      const v0 = t0 * 2.2;
+      const v1 = t1 * 2.2;
+      for (let c = 0; c < cols; c += 1) {
+        const u0 = c / cols;
+        const u1 = (c + 1) / cols;
+        const p00 = samplePt(u0, t0);
+        const p10 = samplePt(u1, t0);
+        const p01 = samplePt(u0, t1);
+        const p11 = samplePt(u1, t1);
+        b.pushVert(p00.x, p00.y, p00.z, p00.nx, p00.ny, p00.nz, st.weight, st.seed, p00.ledgeFoam, u0, v0);
+        b.pushVert(p01.x, p01.y, p01.z, p01.nx, p01.ny, p01.nz, st.weight, st.seed, p01.ledgeFoam, u0, v1);
+        b.pushVert(p11.x, p11.y, p11.z, p11.nx, p11.ny, p11.nz, st.weight, st.seed, p11.ledgeFoam, u1, v1);
+
+        b.pushVert(p00.x, p00.y, p00.z, p00.nx, p00.ny, p00.nz, st.weight, st.seed, p00.ledgeFoam, u0, v0);
+        b.pushVert(p11.x, p11.y, p11.z, p11.nx, p11.ny, p11.nz, st.weight, st.seed, p11.ledgeFoam, u1, v1);
+        b.pushVert(p10.x, p10.y, p10.z, p10.nx, p10.ny, p10.nz, st.weight, st.seed, p10.ledgeFoam, u1, v0);
       }
     }
   }
   return b.toMesh();
 }
 
-/** Curved near-vertical waterfall curtain at the northern lake outlet into the canyon head. */
-export function buildWaterfallMesh() {
+/** Craggy dark wet-rock ribs and sub-stream rock spines separating and flanking the waterfall cascades. */
+export function buildWaterfallRocksMesh() {
   const b = createBuilder(true);
-  const cols = 10;
-  const rows = 14;
-  const halfW = 39;
+  const ribs = [
+    // Primary wet rock buttresses separating West / Main / East cascades
+    { xOffTop: -22.5, xOffBot: -30.0, halfWTop: 7.5, halfWBot: 11.5, protrude: 7.6, yTopOff: 0.4, seed: 1.2 },
+    { xOffTop: 19.0,  xOffBot: 25.5,  halfWTop: 7.0, halfWBot: 10.5, protrude: 7.2, yTopOff: 0.4, seed: 2.7 },
+    // Dark wet rock spines recessed behind sub-stream seams so narrow gaps reveal dark wet stone
+    { xOffTop: -5.5,  xOffBot: -10.5, halfWTop: 3.4, halfWBot: 5.2,  protrude: 3.6, yTopOff: -2.0, seed: 3.3 },
+    { xOffTop: 4.5,   xOffBot: 7.5,   halfWTop: 3.2, halfWBot: 4.8,  protrude: 3.4, yTopOff: -2.0, seed: 3.9 },
+    { xOffTop: -38.5, xOffBot: -50.5, halfWTop: 3.2, halfWBot: 4.6,  protrude: 3.2, yTopOff: -2.0, seed: 4.6 },
+    { xOffTop: 33.5,  xOffBot: 44.5,  halfWTop: 2.8, halfWBot: 4.2,  protrude: 3.0, yTopOff: -2.0, seed: 5.1 },
+    // Outer wet flanking cliff spurs tucked smoothly into the rocky canyon-lip shoulders
+    { xOffTop: -54.0, xOffBot: -71.0, halfWTop: 10.0, halfWBot: 14.0, protrude: 5.8, yTopOff: -0.8, seed: 4.1 },
+    { xOffTop: 46.5,  xOffBot: 62.0,  halfWTop: 9.5,  halfWBot: 13.5, protrude: 5.8, yTopOff: -0.8, seed: 5.6 },
+  ];
 
-  const samplePt = (u, t) => {
-    // t=0 at lake lip (-1350, y=0.6), t=1 at plunge pool (-1298, y=-124.4)
-    const zBase = lerp(WATERFALL_Z_TOP + 2, WATERFALL_Z_BOT + 4, Math.pow(t, 0.88));
-    const cx = riverCenterX(zBase);
-    const s = u * 2 - 1; // -1..1 across width
-    const archBulge = (1 - s * s) * (4.5 + 8.5 * Math.sin(t * Math.PI * 0.7));
-    const x = cx + s * halfW * lerp(0.92, 1.08, t);
-    const y = lerp(0.6, CANYON_WATER_Y - 0.5, Math.pow(t, 1.12));
-    const z = zBase + archBulge;
-    return { x, y, z, nx: s * 0.28, ny: lerp(0.45, 0.14, t), nz: 0.94 };
-  };
+  const rows = 22;
+  const cols = 7;
+  for (let ri = 0; ri < ribs.length; ri += 1) {
+    const rb = ribs[ri];
+    const pt = (u, t) => {
+      const s = u * 2 - 1;
+      const zWall = lerp(WATERFALL_Z_TOP + 2, WATERFALL_Z_BOT + 4, Math.pow(t, 0.90));
+      const strata = 1.0 + 0.34 * Math.sin(t * 24.0 + rb.seed) + 0.20 * Math.cos(t * 41.0 - rb.seed * 1.7 + s * 2.4);
+      const ridgeProfile = Math.pow(Math.max(0, 1 - s * s), 1.15);
+      const topTaper = smooth01(t / 0.16);
+      const cx = riverCenterX(zWall) + lerp(rb.xOffTop, rb.xOffBot, t) + Math.sin(t * 8.5 + rb.seed) * 2.4;
+      const hw = lerp(rb.halfWTop, rb.halfWBot, t) * (0.86 + 0.24 * Math.sin(t * 13.0 + rb.seed * 2.1));
+      const x = cx + s * hw;
+      const y = lerp(WORLD.waterY + rb.yTopOff, CANYON_WATER_Y - 3.5, Math.pow(t, 1.05));
+      const z = zWall - 3.5 + ridgeProfile * rb.protrude * strata * topTaper * (0.35 + 0.65 * Math.sin(t * Math.PI * 0.92));
+      const nx = s * 0.78;
+      const ny = 0.22 + 0.18 * Math.cos(t * 24.0 + rb.seed);
+      const nz = 0.58;
+      const nLen = Math.hypot(nx, ny, nz) || 1;
+      const wetDark = 0.34 + 0.14 * (1 - ridgeProfile) + 0.10 * Math.sin(t * 17.0 + s * 4.0 + rb.seed);
+      return {
+        x,
+        y,
+        z,
+        nx: nx / nLen,
+        ny: ny / nLen,
+        nz: nz / nLen,
+        cr: wetDark * 1.04,
+        cg: wetDark * 0.74,
+        cb: wetDark * 0.67,
+        u: x / 56,
+        v: -y / 38,
+      };
+    };
 
-  for (let r = 0; r < rows; r += 1) {
-    const t0 = r / rows;
-    const t1 = (r + 1) / rows;
-    const v0 = t0 * 2.2;
-    const v1 = t1 * 2.2;
-    for (let c = 0; c < cols; c += 1) {
-      const u0 = c / cols;
-      const u1 = (c + 1) / cols;
-      const p00 = samplePt(u0, t0);
-      const p10 = samplePt(u1, t0);
-      const p01 = samplePt(u0, t1);
-      const p11 = samplePt(u1, t1);
-      b.pushVert(p00.x, p00.y, p00.z, p00.nx, p00.ny, p00.nz, 0.96, 0.98, 1.0, u0, v0);
-      b.pushVert(p01.x, p01.y, p01.z, p01.nx, p01.ny, p01.nz, 0.96, 0.98, 1.0, u0, v1);
-      b.pushVert(p11.x, p11.y, p11.z, p11.nx, p11.ny, p11.nz, 0.96, 0.98, 1.0, u1, v1);
+    for (let r = 0; r < rows; r += 1) {
+      const t0 = r / rows;
+      const t1 = (r + 1) / rows;
+      for (let c = 0; c < cols; c += 1) {
+        const u0 = c / cols;
+        const u1 = (c + 1) / cols;
+        const p00 = pt(u0, t0);
+        const p10 = pt(u1, t0);
+        const p01 = pt(u0, t1);
+        const p11 = pt(u1, t1);
+        b.pushVert(p00.x, p00.y, p00.z, p00.nx, p00.ny, p00.nz, p00.cr, p00.cg, p00.cb, p00.u, p00.v);
+        b.pushVert(p01.x, p01.y, p01.z, p01.nx, p01.ny, p01.nz, p01.cr, p01.cg, p01.cb, p01.u, p01.v);
+        b.pushVert(p11.x, p11.y, p11.z, p11.nx, p11.ny, p11.nz, p11.cr, p11.cg, p11.cb, p11.u, p11.v);
 
-      b.pushVert(p00.x, p00.y, p00.z, p00.nx, p00.ny, p00.nz, 0.96, 0.98, 1.0, u0, v0);
-      b.pushVert(p11.x, p11.y, p11.z, p11.nx, p11.ny, p11.nz, 0.96, 0.98, 1.0, u1, v1);
-      b.pushVert(p10.x, p10.y, p10.z, p10.nx, p10.ny, p10.nz, 0.96, 0.98, 1.0, u1, v0);
+        b.pushVert(p00.x, p00.y, p00.z, p00.nx, p00.ny, p00.nz, p00.cr, p00.cg, p00.cb, p00.u, p00.v);
+        b.pushVert(p11.x, p11.y, p11.z, p11.nx, p11.ny, p11.nz, p11.cr, p11.cg, p11.cb, p11.u, p11.v);
+        b.pushVert(p10.x, p10.y, p10.z, p10.nx, p10.ny, p10.nz, p10.cr, p10.cg, p10.cb, p10.u, p10.v);
+      }
     }
   }
   return b.toMesh();
 }
 
-/** Elliptical plunge-pool foam ring at the base of the waterfall. */
+/** Layered plunge-pool foam rings aligned to the 3 stream impacts + lake-lip whitewater transition + downstream wake. */
 export function buildWaterfallFoamMesh() {
   const b = createBuilder(true);
-  const segs = 24;
-  const rings = 4;
-  const cz = WATERFALL_Z_BOT + 14;
-  const cx = riverCenterX(cz);
-  const y = CANYON_WATER_Y + 0.36;
-  const rx = 68;
-  const rz = 52;
+  const segs = 28;
+  const rings = 5;
+  const emitFoamDisc = (cx, cz, y, rx, rz) => {
+    for (let ring = 0; ring < rings; ring += 1) {
+      const r0 = ring / rings;
+      const r1 = (ring + 1) / rings;
+      for (let s = 0; s < segs; s += 1) {
+        const a0 = (s / segs) * Math.PI * 2;
+        const a1 = ((s + 1) / segs) * Math.PI * 2;
+        const c0 = Math.cos(a0);
+        const s0 = Math.sin(a0);
+        const c1 = Math.cos(a1);
+        const s1 = Math.sin(a1);
 
-  for (let ring = 0; ring < rings; ring += 1) {
-    const r0 = ring / rings;
-    const r1 = (ring + 1) / rings;
-    for (let s = 0; s < segs; s += 1) {
-      const a0 = (s / segs) * Math.PI * 2;
-      const a1 = ((s + 1) / segs) * Math.PI * 2;
-      const c0 = Math.cos(a0);
-      const s0 = Math.sin(a0);
-      const c1 = Math.cos(a1);
-      const s1 = Math.sin(a1);
+        const u00 = c0 * r0;
+        const v00 = s0 * r0;
+        const u10 = c1 * r0;
+        const v10 = s1 * r0;
+        const u01 = c0 * r1;
+        const v01 = s0 * r1;
+        const u11 = c1 * r1;
+        const v11 = s1 * r1;
 
-      const u00 = c0 * r0;
-      const v00 = s0 * r0;
-      const u10 = c1 * r0;
-      const v10 = s1 * r0;
-      const u01 = c0 * r1;
-      const v01 = s0 * r1;
-      const u11 = c1 * r1;
-      const v11 = s1 * r1;
+        b.pushVert(cx + u00 * rx, y, cz + v00 * rz, 0, 1, 0, 1, 1, 1, u00, v00);
+        b.pushVert(cx + u01 * rx, y, cz + v01 * rz, 0, 1, 0, 1, 1, 1, u01, v01);
+        b.pushVert(cx + u11 * rx, y, cz + v11 * rz, 0, 1, 0, 1, 1, 1, u11, v11);
 
-      b.pushVert(cx + u00 * rx, y, cz + v00 * rz, 0, 1, 0, 1, 1, 1, u00, v00);
-      b.pushVert(cx + u01 * rx, y, cz + v01 * rz, 0, 1, 0, 1, 1, 1, u01, v01);
-      b.pushVert(cx + u11 * rx, y, cz + v11 * rz, 0, 1, 0, 1, 1, 1, u11, v11);
-
-      b.pushVert(cx + u00 * rx, y, cz + v00 * rz, 0, 1, 0, 1, 1, 1, u00, v00);
-      b.pushVert(cx + u11 * rx, y, cz + v11 * rz, 0, 1, 0, 1, 1, 1, u11, v11);
-      b.pushVert(cx + u10 * rx, y, cz + v10 * rz, 0, 1, 0, 1, 1, 1, u10, v10);
+        b.pushVert(cx + u00 * rx, y, cz + v00 * rz, 0, 1, 0, 1, 1, 1, u00, v00);
+        b.pushVert(cx + u11 * rx, y, cz + v11 * rz, 0, 1, 0, 1, 1, 1, u11, v11);
+        b.pushVert(cx + u10 * rx, y, cz + v10 * rz, 0, 1, 0, 1, 1, 1, u10, v10);
+      }
     }
-  }
+  };
+  // Plunge-pool impact foam discs (+25-30% radius, aligned to 3 cascade groups)
+  const czMain = WATERFALL_Z_BOT + 18;
+  emitFoamDisc(riverCenterX(czMain) - 1.5, czMain, CANYON_WATER_Y + 0.38, 44, 34);
+  const czWest = WATERFALL_Z_BOT + 13;
+  emitFoamDisc(riverCenterX(czWest) - 50, czWest, CANYON_WATER_Y + 0.34, 28, 23);
+  const czEast = WATERFALL_Z_BOT + 14;
+  emitFoamDisc(riverCenterX(czEast) + 44, czEast, CANYON_WATER_Y + 0.32, 26, 22);
+  const czWake = WATERFALL_Z_BOT + 54;
+  emitFoamDisc(riverCenterX(czWake), czWake, CANYON_WATER_Y + 0.24, 44, 66);
+
+  // Irregular whitewater lip foam collars at lake-outlet entry so lake water transitions naturally into cascades
+  const czLip = WATERFALL_Z_TOP - 8;
+  const cxLip = riverCenterX(czLip);
+  emitFoamDisc(cxLip - 1, czLip - 2, WORLD.waterY + 0.14, 24, 13);
+  emitFoamDisc(cxLip - 38, czLip - 5, WORLD.waterY + 0.14, 15, 10);
+  emitFoamDisc(cxLip + 33, czLip - 5, WORLD.waterY + 0.14, 13, 9);
   return b.toMesh();
 }
 
-/** Bright unlit volumetric mist puffs rising around the waterfall plunge pool. */
+/** Rising plunge-pool spray & mist plumes climbing up to the lower half of the 3 waterfall groups. */
 export function buildWaterfallMistMesh() {
   const b = createBuilder();
   const centers = [];
   const rand = createRandom(4409);
   const baseZ = WATERFALL_Z_BOT + 16;
   const baseX = riverCenterX(baseZ);
-  for (let i = 0; i < 18; i += 1) {
-    const spread = i / 18;
-    const mx = baseX + (rand() - 0.5) * 92;
-    const mz = baseZ + (rand() - 0.3) * 86;
-    const my = CANYON_WATER_Y + 4 + spread * 54 + rand() * 12;
-    const rx = 18 + rand() * 20;
-    const ry = 10 + rand() * 13;
-    const rz = 16 + rand() * 18;
-    addCloudBlob(b, centers, mx, mz, mx, my, mz, rx, ry, rz, 0.99, 0.98, 0.99, i * 1.13);
+  for (let i = 0; i < 42; i += 1) {
+    // 18 puffs on main, 12 on west, 12 on east
+    const streamBias = i < 18 ? -1.5 : i < 30 ? -50 : 44;
+    const spreadX = i < 18 ? 36 : 22;
+    const colT = (i % 7) / 6;
+    const mx = baseX + streamBias + (rand() - 0.5) * spreadX;
+    const mz = baseZ + 2 + colT * 30 + (rand() - 0.5) * 18;
+    const my = CANYON_WATER_Y + 4.5 + Math.pow(colT, 0.88) * 58.0 + (rand() - 0.5) * 7.0;
+    const rx = 7.0 + rand() * 5.8 + (1 - colT) * 3.0;
+    const ry = 9.5 + rand() * 7.5 + colT * 3.5;
+    const rz = 7.0 + rand() * 5.8 + (1 - colT) * 3.0;
+    addCloudBlob(b, centers, mx, mz, mx, my, mz, rx, ry, rz, 0.88, 0.92, 0.96, i * 1.37);
   }
   const mesh = b.toMesh();
   mesh.centers = new Float32Array(centers);
@@ -2706,14 +3099,21 @@ export function buildEmissiveMesh() {
   return ew.toMesh();
 }
 
-// --- Smooth-Shaded Trees (3 Types) & Field-Edge Hedgerows ---
+// --- Organic Multi-Cluster Trees (3 Types) & Irregular Wild Hedgerows ---
 
-/** Smooth-shaded cone foliage tier with radial+upward smooth normals and bottom AO shading. */
-function addSmoothCone(b, cx, botY, cz, h, radius, sides, r, g, bl, angleOffset = 0) {
+/** Smooth-shaded cone helper (used by silos, spires & water tower roofs). */
+function addSmoothCone(b, cx, botY, cz, h, radius, sides, r, g, bl, angleOffset = 0, snowAmount = 0) {
   const topY = botY + h;
   const slopeLen = Math.hypot(radius, h) || 1;
   const nHoriz = h / slopeLen;
   const nVert = radius / slopeLen;
+  const sr = lerp(r * 1.12, 0.94, snowAmount);
+  const sg = lerp(g * 1.12, 0.95, snowAmount);
+  const sb = lerp(bl * 1.10, 0.97, snowAmount);
+  const rimSnow = snowAmount * 0.48;
+  const rr = lerp(r * 0.78, 0.88, rimSnow);
+  const rg = lerp(g * 0.78, 0.90, rimSnow);
+  const rb = lerp(bl * 0.80, 0.93, rimSnow);
 
   for (let i = 0; i < sides; i += 1) {
     const a0 = angleOffset + (i / sides) * Math.PI * 2;
@@ -2724,26 +3124,100 @@ function addSmoothCone(b, cx, botY, cz, h, radius, sides, r, g, bl, angleOffset 
     const s1 = Math.sin(a1);
     const cm = Math.cos((a0 + a1) * 0.5);
     const sm = Math.sin((a0 + a1) * 0.5);
-
     const x0 = cx + c0 * radius;
     const z0 = cz + s0 * radius;
     const x1 = cx + c1 * radius;
     const z1 = cz + s1 * radius;
-
-    // Smooth side face (darkened slightly at rim/underside for natural foliage depth)
-    b.pushVert(cx, topY, cz, cm * 0.35, 0.94, sm * 0.35, r * 1.12, g * 1.12, bl * 1.10);
-    b.pushVert(x1, botY, z1, c1 * nHoriz, nVert, s1 * nHoriz, r * 0.78, g * 0.78, bl * 0.80);
-    b.pushVert(x0, botY, z0, c0 * nHoriz, nVert, s0 * nHoriz, r * 0.78, g * 0.78, bl * 0.80);
-
-    // Underside cap
+    b.pushVert(cx, topY, cz, cm * 0.35, 0.94, sm * 0.35, sr, sg, sb);
+    b.pushVert(x1, botY, z1, c1 * nHoriz, nVert, s1 * nHoriz, rr, rg, rb);
+    b.pushVert(x0, botY, z0, c0 * nHoriz, nVert, s0 * nHoriz, rr, rg, rb);
     b.pushVert(cx, botY, cz, 0, -1, 0, r * 0.45, g * 0.45, bl * 0.48);
     b.pushVert(x0, botY, z0, 0, -1, 0, r * 0.58, g * 0.58, bl * 0.60);
     b.pushVert(x1, botY, z1, 0, -1, 0, r * 0.58, g * 0.58, bl * 0.60);
   }
 }
 
-/** Smooth-shaded organic rounded canopy cluster with vertex-AO & subtle leaf-clump ripples. */
-function addSmoothCanopy(b, cx, cy, cz, rx, ry, rz, r, g, bl, lonSegs = 9, latSegs = 4, phase = 0) {
+/** Irregular asymmetric bough tier with strongly notched/drooping rims (no cone edge or flat base). */
+function addConiferTier(b, cx, botY, cz, h, radius, sides, r, g, bl, angleOffset = 0, snowAmount = 0, droop = 0.34) {
+  const leanX = Math.cos(angleOffset * 1.9 + 0.4) * radius * 0.24;
+  const leanZ = Math.sin(angleOffset * 1.9 + 0.4) * radius * 0.24;
+  const topX = cx + leanX;
+  const topY = botY + h * (0.94 + 0.10 * Math.sin(angleOffset * 2.3));
+  const topZ = cz + leanZ;
+
+  const sr = lerp(r * 1.15, 0.94, snowAmount);
+  const sg = lerp(g * 1.15, 0.95, snowAmount);
+  const sb = lerp(bl * 1.12, 0.97, snowAmount);
+  const midSnow = snowAmount * 0.80;
+  const mr = lerp(r * 1.03, 0.91, midSnow);
+  const mg = lerp(g * 1.03, 0.93, midSnow);
+  const mb = lerp(bl * 1.03, 0.95, midSnow);
+  const tipSnow = snowAmount * 0.34;
+  const tr = lerp(r * 0.68, 0.86, tipSnow);
+  const tg = lerp(g * 0.68, 0.88, tipSnow);
+  const tb = lerp(bl * 0.70, 0.91, tipSnow);
+
+  const midRing = [];
+  const tipRing = [];
+  for (let i = 0; i < sides; i += 1) {
+    const a = angleOffset + (i / sides) * Math.PI * 2 + 0.24 * Math.sin(i * 2.5 + angleOffset * 1.7);
+    const ca = Math.cos(a);
+    const sa = Math.sin(a);
+    const boughMod = 1.0
+      + 0.28 * Math.sin(i * 2.7 + angleOffset * 3.1)
+      + 0.16 * Math.cos(i * 4.3 - angleOffset * 1.9);
+    const notch = (i % 2 === 0 ? 1.08 : 0.82) + 0.10 * Math.sin(i * 1.7 + angleOffset * 2.9);
+    const tipRad = radius * clamp(boughMod * notch, 0.64, 1.32);
+    const midRad = tipRad * clamp(0.74 + 0.14 * Math.cos(i * 2.1 - angleOffset), 0.62, 0.92);
+    const yMid = botY + h * clamp(0.68 + 0.14 * Math.cos(i * 2.3 + angleOffset * 1.4), 0.52, 0.84);
+    const yTip = botY - droop * h * 1.15 * (boughMod - 0.84) + (i % 2 === 0 ? -0.14 : 0.18) * h + 0.12 * h * Math.sin(i * 3.3 + angleOffset);
+
+    midRing.push({
+      x: cx + ca * midRad + leanX * 0.45,
+      y: yMid,
+      z: cz + sa * midRad + leanZ * 0.45,
+      nx: ca * 0.64,
+      ny: 0.76,
+      nz: sa * 0.64,
+    });
+    tipRing.push({
+      x: cx + ca * tipRad,
+      y: yTip,
+      z: cz + sa * tipRad,
+      nx: ca * 0.88,
+      ny: 0.34,
+      nz: sa * 0.88,
+      shade: 0.82 + 0.26 * clamp(boughMod - 0.72, 0, 0.65),
+    });
+  }
+
+  for (let i = 0; i < sides; i += 1) {
+    const i2 = (i + 1) % sides;
+    const m0 = midRing[i];
+    const m1 = midRing[i2];
+    const t0 = tipRing[i];
+    const t1 = tipRing[i2];
+    const amx = (m0.nx + m1.nx) * 0.5;
+    const amz = (m0.nz + m1.nz) * 0.5;
+
+    // Asymmetric upper bough crown
+    b.pushVert(topX, topY, topZ, amx * 0.35, 0.94, amz * 0.35, sr, sg, sb);
+    b.pushVert(m1.x, m1.y, m1.z, m1.nx, m1.ny, m1.nz, mr, mg, mb);
+    b.pushVert(m0.x, m0.y, m0.z, m0.nx, m0.ny, m0.nz, mr, mg, mb);
+
+    // Jagged drooping outer bough skirt
+    b.pushVert(m0.x, m0.y, m0.z, m0.nx, m0.ny, m0.nz, mr, mg, mb);
+    b.pushVert(m1.x, m1.y, m1.z, m1.nx, m1.ny, m1.nz, mr, mg, mb);
+    b.pushVert(t1.x, t1.y, t1.z, t1.nx, t1.ny, t1.nz, tr * t1.shade, tg * t1.shade, tb * t1.shade);
+
+    b.pushVert(m0.x, m0.y, m0.z, m0.nx, m0.ny, m0.nz, mr, mg, mb);
+    b.pushVert(t1.x, t1.y, t1.z, t1.nx, t1.ny, t1.nz, tr * t1.shade, tg * t1.shade, tb * t1.shade);
+    b.pushVert(t0.x, t0.y, t0.z, t0.nx, t0.ny, t0.nz, tr * t0.shade, tg * t0.shade, tb * t0.shade);
+  }
+}
+
+/** Organic irregular foliage cluster with multi-harmonic perturbation, uneven underside, and AO. */
+function addSmoothCanopy(b, cx, cy, cz, rx, ry, rz, r, g, bl, lonSegs = 6, latSegs = 3, phase = 0) {
   const vert = (lat, lon) => {
     const phi = (lat / latSegs) * Math.PI;
     const theta = (lon / lonSegs) * Math.PI * 2;
@@ -2752,22 +3226,25 @@ function addSmoothCanopy(b, cx, cy, cz, rx, ry, rz, r, g, bl, lonSegs = 9, latSe
     const uy = Math.cos(phi);
     const uz = sp * Math.sin(theta);
 
-    // Subtle organic foliage bumpiness so canopies read as leafy clusters, not geometric spheres
-    const lump = 1.0 + 0.085 * Math.sin(theta * 3.0 + phase) * Math.sin(phi * 2.0 + 0.7) + 0.05 * Math.cos(theta * 5.0 - phase);
-    const nLen = Math.hypot(ux, uy * 1.05, uz) || 1;
-    // Soft upward foliage normal bias mimics diffuse sky scattering in leaf crowns
-    const nx = ux / nLen;
-    const ny = (uy + 0.22) / Math.hypot(ux, uy + 0.22, uz);
-    const nz = uz / nLen;
-    // Bottom-to-top ambient occlusion shading inside canopy
-    const ao = lerp(0.64, 1.12, smooth01((uy + 1.0) * 0.5));
+    // Strong multi-frequency organic perturbation so crowns never read as geometric spheres
+    const nA = Math.sin(theta * 3.0 + phase * 1.3) * Math.cos(phi * 2.0 - phase * 0.6);
+    const nB = Math.cos(theta * 5.0 - phase * 2.1) * Math.sin(phi * 3.0 + 0.8);
+    const nC = Math.sin(ux * 4.7 + uy * 3.9 - uz * 5.1 + phase * 3.1);
+    const lump = 1.0 + 0.22 * nA + 0.14 * nB + 0.11 * nC;
+    const yShape = uy < 0 ? uy * (0.64 + 0.14 * nA) : uy * (1.06 + 0.10 * nB);
+
+    const pnx = ux + 0.26 * nB;
+    const pny = uy + 0.24 + 0.16 * nA;
+    const pnz = uz + 0.26 * nC;
+    const nLen = Math.hypot(pnx, pny, pnz) || 1;
+    const ao = lerp(0.56, 1.16, smooth01((uy + 1.0) * 0.5)) * (1.0 + nC * 0.10 + nB * 0.06);
     return {
       x: cx + ux * rx * lump,
-      y: cy + uy * ry * lump,
+      y: cy + yShape * ry * (0.94 + 0.14 * nA + 0.10 * nC),
       z: cz + uz * rz * lump,
-      nx,
-      ny,
-      nz,
+      nx: pnx / nLen,
+      ny: pny / nLen,
+      nz: pnz / nLen,
       cr: clamp(r * ao, 0, 1),
       cg: clamp(g * ao, 0, 1),
       cb: clamp(bl * ao, 0, 1),
@@ -2798,68 +3275,103 @@ function addSmoothCanopy(b, cx, cy, cz, rx, ry, rz, r, g, bl, lonSegs = 9, latSe
   }
 }
 
-/** Type 1: Smooth-shaded conifer with cylindrical trunk + 3 layered smooth foliage cones. */
-function addConiferTree(b, x, y, z, scale, shade, rot = 0, tint = [1, 1, 1]) {
+/** Type 1: Irregular alpine conifer with trunk + non-monotonic, heavily off-center bough tiers (+ snow dust). */
+function addConiferTree(b, x, y, z, scale, shade, rot = 0, tint = [1, 1, 1], baseCol = [0.11, 0.26, 0.14], snowAmount = 0) {
   const [tr, tg, tb] = tint;
-  addSmoothCylinder(b, x, y, z, 0.55 * scale, 0.24 * scale, 4.2 * scale, 6, 0.29, 0.20, 0.13);
-  addSmoothCone(b, x, y + 2.5 * scale, z, 5.4 * scale, 3.8 * scale, 8, 0.13 * shade * tr, 0.29 * shade * tg, 0.15 * shade * tb, rot);
-  addSmoothCone(b, x, y + 5.1 * scale, z, 4.9 * scale, 3.0 * scale, 8, 0.16 * shade * tr, 0.34 * shade * tg, 0.17 * shade * tb, rot + 0.42);
-  addSmoothCone(b, x, y + 7.7 * scale, z, 4.4 * scale, 2.0 * scale, 8, 0.19 * shade * tr, 0.39 * shade * tg, 0.19 * shade * tb, rot + 0.85);
+  const [br, bg, bb] = baseCol;
+  const windswept = ((rot * 10) % 3) < 1.15;
+  addSmoothCylinder(b, x, y, z, 0.72 * scale, 0.24 * scale, (windswept ? 6.4 : 4.8) * scale, 5, 0.28, 0.19, 0.13);
+
+  const nonMono = ((rot * 17.3) % 2.0) < 1.05;
+  const tiers = windswept
+    ? [
+      { yOff: 4.3, h: 2.9, rad: nonMono ? 3.35 : 4.15, ang: rot + 0.4, offFrac: 0.26, colMul: 1.00, snow: 0.45, droop: 0.28 },
+      { yOff: 6.7, h: 2.7, rad: nonMono ? 4.05 : 2.95, ang: rot + 2.3, offFrac: 0.29, colMul: 1.18, snow: 0.78, droop: 0.26 },
+      { yOff: 9.1, h: 2.5, rad: nonMono ? 2.45 : 3.20, ang: rot + 4.4, offFrac: 0.25, colMul: 1.36, snow: 1.00, droop: 0.24 },
+    ]
+    : [
+      { yOff: 2.9, h: 3.3, rad: nonMono ? 3.55 : 4.25, ang: rot + 0.7, offFrac: 0.25, colMul: 1.00, snow: 0.35, droop: 0.28 },
+      { yOff: 5.6, h: 3.1, rad: nonMono ? 4.20 : 3.05, ang: rot + 2.7, offFrac: 0.30, colMul: 1.18, snow: 0.72, droop: 0.26 },
+      { yOff: 8.2, h: 2.8, rad: nonMono ? 2.35 : 3.15, ang: rot + 4.7, offFrac: 0.26, colMul: 1.38, snow: 1.00, droop: 0.22 },
+    ];
+
+  for (let i = 0; i < tiers.length; i += 1) {
+    const trSpec = tiers[i];
+    const rad = trSpec.rad * scale;
+    const offDist = rad * trSpec.offFrac;
+    const ox = Math.cos(trSpec.ang) * offDist;
+    const oz = Math.sin(trSpec.ang) * offDist;
+    addConiferTier(
+      b,
+      x + ox,
+      y + trSpec.yOff * scale,
+      z + oz,
+      trSpec.h * scale,
+      rad,
+      i === 2 ? 5 : 6,
+      clamp(br * trSpec.colMul * shade * tr, 0, 1),
+      clamp(bg * (0.98 + 0.04 * i) * trSpec.colMul * shade * tg, 0, 1),
+      clamp(bb * (0.96 + 0.04 * i) * trSpec.colMul * shade * tb, 0, 1),
+      rot + i * 1.15,
+      snowAmount * trSpec.snow,
+      trSpec.droop,
+    );
+  }
 }
 
-/** Type 2: Broadleaf oak/deciduous with tapered cylindrical trunk + multi-lobe smooth canopy. */
-function addBroadleafTree(b, x, y, z, scale, shade, rot = 0, tint = [1, 1, 1]) {
+/** Type 2: Broadleaf oak/deciduous with trunk + 4 distinctly separated asymmetric foliage clusters. */
+function addBroadleafTree(b, x, y, z, scale, shade, rot = 0, tint = [1, 1, 1], baseCol = [0.21, 0.40, 0.15]) {
   const [tr, tg, tb] = tint;
-  addSmoothCylinder(b, x, y, z, 0.56 * scale, 0.34 * scale, 4.6 * scale, 6, 0.31, 0.22, 0.14);
+  const [br, bg, bb] = baseCol;
+  addSmoothCylinder(b, x, y, z, 0.74 * scale, 0.40 * scale, 4.4 * scale, 5, 0.30, 0.21, 0.14);
   const c = Math.cos(rot);
   const s = Math.sin(rot);
-  const warmShift = (shade - 0.95) * 0.08;
-  const cr = clamp((0.22 + warmShift) * shade * tr, 0, 1);
-  const cg = clamp(0.41 * shade * tg, 0, 1);
-  const cb = clamp(0.16 * shade * tb, 0, 1);
-  const cy = y + 6.0 * scale;
-  addSmoothCanopy(b, x, cy, z, 3.6 * scale, 3.0 * scale, 3.5 * scale, cr, cg, cb, 9, 4, rot);
-  addSmoothCanopy(
-    b,
-    x + c * 1.5 * scale,
-    cy + 1.0 * scale,
-    z - s * 1.5 * scale,
-    2.6 * scale,
-    2.2 * scale,
-    2.5 * scale,
-    cr * 1.06,
-    cg * 1.06,
-    cb * 1.04,
-    8,
-    4,
-    rot + 1.1,
-  );
-  addSmoothCanopy(
-    b,
-    x - c * 1.3 * scale + s * 1.0 * scale,
-    cy - 0.2 * scale,
-    z + s * 1.3 * scale + c * 1.0 * scale,
-    2.4 * scale,
-    2.0 * scale,
-    2.4 * scale,
-    cr * 0.92,
-    cg * 0.94,
-    cb * 0.95,
-    8,
-    4,
-    rot + 2.3,
-  );
+  const warmShift = (shade - 0.95) * 0.07;
+  const cr = clamp((br + warmShift) * shade * tr, 0, 1);
+  const cg = clamp(bg * shade * tg, 0, 1);
+  const cb = clamp(bb * shade * tb, 0, 1);
+  const cy = y + 5.6 * scale;
+  // Four widely offset clusters with smaller radii so distinct sub-crowns break any spherical outline
+  const lobes = [
+    [-c * 2.1 + s * 1.2, -0.35, s * 2.1 + c * 1.2, 2.5, 2.0, 2.3, 0.86, 0.90, 0.94, 0.3],
+    [c * 2.5 - s * 0.9, 1.35, -s * 2.5 - c * 0.9, 2.4, 2.1, 2.2, 1.16, 1.10, 1.02, 1.7],
+    [-c * 0.8 - s * 2.4, 0.95, s * 0.8 - c * 2.4, 2.2, 1.9, 2.4, 0.98, 1.00, 0.98, 3.1],
+    [c * 0.6 + s * 1.5, 2.65, -s * 0.6 + c * 1.5, 1.9, 1.8, 1.9, 1.18, 1.14, 1.04, 4.6],
+  ];
+  for (let i = 0; i < lobes.length; i += 1) {
+    const lb = lobes[i];
+    addSmoothCanopy(
+      b,
+      x + lb[0] * scale,
+      cy + lb[1] * scale,
+      z + lb[2] * scale,
+      lb[3] * scale,
+      lb[4] * scale,
+      lb[5] * scale,
+      clamp(cr * lb[6], 0, 1),
+      clamp(cg * lb[7], 0, 1),
+      clamp(cb * lb[8], 0, 1),
+      5,
+      3,
+      rot + lb[9],
+    );
+  }
 }
 
-/** Type 3: Tall slender poplar / cypress with smooth oval crown. */
-function addPoplarTree(b, x, y, z, scale, shade, rot = 0, tint = [1, 1, 1]) {
+/** Type 3: Tall irregular poplar / aspen with trunk + 4 strongly offset asymmetric foliage tufts. */
+function addPoplarTree(b, x, y, z, scale, shade, rot = 0, tint = [1, 1, 1], baseCol = [0.19, 0.38, 0.16]) {
   const [tr, tg, tb] = tint;
-  addSmoothCylinder(b, x, y, z, 0.44 * scale, 0.24 * scale, 3.8 * scale, 6, 0.30, 0.22, 0.15);
-  const cr = clamp(0.19 * shade * tr, 0, 1);
-  const cg = clamp(0.38 * shade * tg, 0, 1);
-  const cb = clamp(0.17 * shade * tb, 0, 1);
-  addSmoothCanopy(b, x, y + 5.4 * scale, z, 2.3 * scale, 3.6 * scale, 2.3 * scale, cr, cg, cb, 8, 4, rot);
-  addSmoothCanopy(b, x, y + 8.6 * scale, z, 1.7 * scale, 3.2 * scale, 1.7 * scale, cr * 1.06, cg * 1.06, cb * 1.04, 8, 4, rot + 1.5);
+  const [br, bg, bb] = baseCol;
+  addSmoothCylinder(b, x, y, z, 0.56 * scale, 0.26 * scale, 3.8 * scale, 5, 0.29, 0.21, 0.14);
+  const c = Math.cos(rot);
+  const s = Math.sin(rot);
+  const cr = clamp(br * shade * tr, 0, 1);
+  const cg = clamp(bg * shade * tg, 0, 1);
+  const cb = clamp(bb * shade * tb, 0, 1);
+  addSmoothCanopy(b, x - c * 1.05 * scale, y + 4.7 * scale, z + s * 1.05 * scale, 2.0 * scale, 2.5 * scale, 1.9 * scale, cr * 0.88, cg * 0.92, cb * 0.94, 5, 3, rot);
+  addSmoothCanopy(b, x + c * 1.25 * scale, y + 6.8 * scale, z - s * 1.25 * scale, 1.9 * scale, 2.4 * scale, 1.8 * scale, clamp(cr * 1.02, 0, 1), clamp(cg * 1.03, 0, 1), clamp(cb * 1.01, 0, 1), 5, 3, rot + 1.4);
+  addSmoothCanopy(b, x - s * 1.15 * scale, y + 8.9 * scale, z - c * 1.15 * scale, 1.55 * scale, 2.3 * scale, 1.50 * scale, clamp(cr * 1.10, 0, 1), clamp(cg * 1.08, 0, 1), clamp(cb * 1.03, 0, 1), 5, 3, rot + 2.7);
+  addSmoothCanopy(b, x + s * 0.70 * scale, y + 11.1 * scale, z + c * 0.70 * scale, 1.15 * scale, 2.0 * scale, 1.10 * scale, clamp(cr * 1.18, 0, 1), clamp(cg * 1.14, 0, 1), clamp(cb * 1.05, 0, 1), 5, 3, rot + 4.1);
 }
 
 function isTreeForbidden(x, z) {
@@ -2872,6 +3384,13 @@ function isTreeForbidden(x, z) {
     const canyonClear = z > WATERFALL_Z_TOP ? (z < 850 ? 172 : 95) : riverHalfWidth(z) + 26;
     if (Math.abs(x - riverCenterX(z)) < canyonClear) return true;
   }
+  // Eagle Gorge channel & cliff walls
+  if (z > -900 && z < 780) {
+    if (Math.abs(x - eagleGorgeCenterX(z)) < 130) return true;
+  }
+  // Alpine tarns
+  if (tarnMask(x, z, GLACIER_TARN, 0.6) > 0.02) return true;
+  if (tarnMask(x, z, HIGHLAND_TARN, -0.8) > 0.02) return true;
   // Village roads & farm tracks
   if (isNearRoad(x, z, 9.5)) return true;
   // Town street grid (uses original 44 houses so tree mesh vertex count remains invariant)
@@ -2896,50 +3415,275 @@ function isTreeForbidden(x, z) {
   return false;
 }
 
+function pickBroadleafColor(x, z, random) {
+  const autumnPatch = valueNoise2D(x * 0.0020 + 3.1, z * 0.0020 - 4.7, 612);
+  const roll = random();
+  if (autumnPatch > 0.50 && roll < 0.72) {
+    const aRoll = random();
+    if (aRoll < 0.38) return [0.76, 0.50, 0.12]; // Bright golden amber
+    if (aRoll < 0.74) return [0.72, 0.32, 0.10]; // Rich autumn orange
+    return [0.60, 0.18, 0.12];                   // Russet crimson
+  }
+  if (roll < 0.32) return [0.12, 0.30, 0.13];    // Deep forest green
+  if (roll < 0.66) return [0.14, 0.35, 0.27];    // Distinct blue-green / sage
+  return [0.33, 0.48, 0.13];                     // Bright yellow-green
+}
+
+function pickPoplarColor(x, z, random) {
+  const autumnPatch = valueNoise2D(x * 0.0020 + 3.1, z * 0.0020 - 4.7, 612);
+  const roll = random();
+  if (autumnPatch > 0.50 && roll < 0.65) {
+    return roll < 0.40 ? [0.76, 0.54, 0.13] : [0.70, 0.33, 0.10]; // Golden aspen / orange
+  }
+  return roll < 0.48 ? [0.13, 0.32, 0.25] : [0.30, 0.46, 0.15];   // Cypress blue-green / yellow-green
+}
+
+function pickConiferColor(random) {
+  const roll = random();
+  if (roll < 0.38) return [0.09, 0.23, 0.13];    // Deep alpine spruce
+  if (roll < 0.72) return [0.10, 0.27, 0.23];    // Blue spruce
+  return [0.16, 0.31, 0.14];                     // Mountain cedar green
+}
+
 function addHedgerowSegment(b, ax, az, bx, bz, random) {
   const dx = bx - ax;
   const dz = bz - az;
   const len = Math.hypot(dx, dz);
   if (len < 10) return;
-  const shrubs = Math.max(4, Math.floor(len / 14));
+  const shrubs = Math.max(4, Math.floor(len / 15));
+  const palette = [
+    [0.13, 0.31, 0.13], // Deep green
+    [0.16, 0.34, 0.22], // Blue-green
+    [0.27, 0.42, 0.15], // Yellow-green
+    [0.54, 0.34, 0.12], // Autumn russet-gold accent
+  ];
   for (let i = 0; i <= shrubs; i += 1) {
-    if (i === Math.floor(shrubs * 0.5) && random() < 0.55) continue;
-    const t = i / shrubs;
-    const jx = (random() - 0.5) * 2.4;
-    const jz = (random() - 0.5) * 2.4;
+    if (i === Math.floor(shrubs * 0.5) && random() < 0.65) continue;
+    if (random() < 0.22) continue;
+    const t = clamp((i + (random() - 0.5) * 0.78) / shrubs, 0.02, 0.98);
+    const jx = (random() - 0.5) * 8.4;
+    const jz = (random() - 0.5) * 8.4;
     const x = ax + dx * t + jx;
     const z = az + dz * t + jz;
-    if (isTreeForbidden(x, z)) continue;
+    if (isTreeForbidden(x, z) || isInHeroCluster(x, z)) continue;
     const h = sampleMeshHeight(x, z);
     const ny = terrainNormalY(x, z);
     if (h < 2.6 || h > 52 || ny < 0.82) continue;
 
-    const shade = 0.85 + random() * 0.25;
-    const rx = 2.6 + random() * 1.4;
-    const ry = 1.6 + random() * 0.9;
-    const rz = 2.6 + random() * 1.4;
-    addSmoothCanopy(b, x, h + ry * 0.45, z, rx, ry, rz, 0.15 * shade, 0.34 * shade, 0.14 * shade, 7, 3, random() * 6);
+    const shade = 0.80 + random() * 0.34;
+    const col = random() < 0.16 ? palette[3] : palette[Math.floor(random() * 3)];
+    const rx = 2.0 + random() * 2.5;
+    const ry = 1.2 + random() * 1.6;
+    const rz = 2.0 + random() * 2.5;
+    addSmoothCanopy(b, x, h + ry * 0.42, z, rx, ry, rz, col[0] * shade, col[1] * shade, col[2] * shade, 6, 3, random() * 6);
+    if (random() < 0.45) {
+      const col2 = palette[Math.floor(random() * 3)];
+      addSmoothCanopy(
+        b,
+        x + (random() - 0.5) * 3.0,
+        h + ry * 0.35,
+        z + (random() - 0.5) * 3.0,
+        rx * 0.78,
+        ry * 0.88,
+        rz * 0.78,
+        col2[0] * shade * 1.08,
+        col2[1] * shade * 1.06,
+        col2[2] * shade,
+        5,
+        3,
+        random() * 6,
+      );
+    }
 
-    if (random() < 0.18) {
-      const scale = 0.8 + random() * 0.45;
-      if (random() < 0.65) addBroadleafTree(b, x, h - 0.2, z, scale, shade, random() * Math.PI * 2);
-      else addPoplarTree(b, x, h - 0.2, z, scale, shade, random() * Math.PI * 2);
+    if (random() < 0.22) {
+      const scale = 0.76 + random() * 0.58;
+      const tx = x + (random() - 0.5) * 7.0;
+      const tz = z + (random() - 0.5) * 7.0;
+      const th = sampleMeshHeight(tx, tz);
+      const tint = [0.88 + random() * 0.24, 0.90 + random() * 0.20, 0.86 + random() * 0.24];
+      if (!isTreeForbidden(tx, tz) && !isInHeroCluster(tx, tz) && th >= 2.6 && th <= 54) {
+        if (random() < 0.72) addBroadleafTree(b, tx, th - 0.25, tz, scale, shade, random() * Math.PI * 2, tint, pickBroadleafColor(tx, tz, random));
+        else addPoplarTree(b, tx, th - 0.25, tz, scale, shade, random() * Math.PI * 2, tint, pickPoplarColor(tx, tz, random));
+      }
     }
   }
 }
 
+// 12 clustered hero GLB stands along flight sightlines & screenshot vistas (~90 trees total, >=120m center spacing)
+const HERO_CLUSTERS = [
+  // ?shot=trees foreground stand (north-east Mirror Lake slope, centered in ?shot=trees sightline)
+  { name: 'grove01_fg', x: 1335, z: -2565, r: 54, pine: 0, oak: 6, maple: 3 },
+  // ?shot=trees upper hillside stand
+  { name: 'grove01_upper', x: 1430, z: -2640, r: 48, pine: 2, oak: 5, maple: 1 },
+  // ?shot=pineslope primary conifer stand (also visible on far right of 2-play)
+  { name: 'pineslope_main', x: -1645, z: -1905, r: 48, pine: 9, oak: 0, maple: 0 },
+  // ?shot=pineslope background ridge
+  { name: 'pineslope_west', x: -1800, z: -1950, r: 46, pine: 7, oak: 0, maple: 0 },
+  // West Mirror Lake slope (-1380, -2020 pine stand)
+  { name: 'pineslope_lake', x: -1385, z: -2025, r: 46, pine: 7, oak: 0, maple: 0 },
+  // ?shot=play (2-play) foreground left slope overlooking Glacier Tarn
+  { name: 'play_fg_left', x: -2130, z: -1340, r: 52, pine: 7, oak: 0, maple: 0 },
+  // ?shot=play (2-play) foreground right slope overlooking Glacier Tarn
+  { name: 'play_fg_right', x: -1760, z: -1460, r: 52, pine: 6, oak: 1, maple: 0 },
+  // Mirror Lake north-shore corridor (near Ring 4)
+  { name: 'mirror_north', x: 420, z: -2520, r: 50, pine: 0, oak: 6, maple: 2 },
+  // Mirror Lake south-east shore / approach corridor (visible in ?shot=approach)
+  { name: 'mirror_south_east', x: 610, z: -1350, r: 48, pine: 0, oak: 6, maple: 2 },
+  // Mirror Lake south-west shore / approach corridor
+  { name: 'mirror_corridor_west', x: -160, z: -1380, r: 48, pine: 0, oak: 5, maple: 2 },
+  // Emerald Forest ridge (Ring 4 -> Ring 5 leg)
+  { name: 'emerald_forest', x: 1420, z: -1200, r: 52, pine: 2, oak: 4, maple: 1 },
+  // Oakwood Town NW perimeter
+  { name: 'oakwood_town', x: 1110, z: 1030, r: 46, pine: 0, oak: 5, maple: 1 },
+];
+
+function isInHeroCluster(x, z) {
+  for (let i = 0; i < HERO_CLUSTERS.length; i += 1) {
+    const c = HERO_CLUSTERS[i];
+    const padR = c.r + 12;
+    const dx = x - c.x;
+    const dz = z - c.z;
+    if (dx * dx + dz * dz <= padR * padR) return true;
+  }
+  return false;
+}
+
+let glbTreePlacements = [];
+
+/** Return a shallow copy of hero GLB tree placements collected during buildTreesMesh. */
+export function getGlbTreePlacements() {
+  return glbTreePlacements.map((p) => ({ ...p, tint: [...p.tint] }));
+}
+
+/**
+ * Build procedural fallback geometry at hero tree locations when GLB templates fail to load.
+ * @param {Array<{ species: 'pine'|'oak'|'maple', x: number, y: number, z: number, scale: number, rot: number }>} placements
+ */
+export function buildHeroFallbackMesh(placements) {
+  const b = createBuilder();
+  if (!placements || !placements.length) return b.toMesh();
+  const fallbackRand = createRandom(99);
+  for (let i = 0; i < placements.length; i += 1) {
+    const p = placements[i];
+    if (p.species === 'pine') {
+      const zones = sampleZoneWeights(p.x, p.z);
+      const snowAmt = zones.plateau > 0.45 ? 0 : smooth01((p.y - 165) / 90);
+      addConiferTree(b, p.x, p.y, p.z, p.scale, 1.0, p.rot, [1, 1, 1], pickConiferColor(fallbackRand), snowAmt);
+    } else if (p.species === 'maple') {
+      const aRoll = fallbackRand();
+      const autumnCol = aRoll < 0.38
+        ? [0.76, 0.50, 0.12]
+        : aRoll < 0.74
+          ? [0.72, 0.32, 0.10]
+          : [0.60, 0.18, 0.12];
+      addBroadleafTree(b, p.x, p.y, p.z, p.scale, 1.0, p.rot, [1, 1, 1], autumnCol);
+    } else {
+      addBroadleafTree(b, p.x, p.y, p.z, p.scale, 1.0, p.rot, [1, 1, 1], pickBroadleafColor(p.x, p.z, fallbackRand));
+    }
+  }
+  return b.toMesh();
+}
+
 export function buildTreesMesh(random) {
   const b = createBuilder();
+  glbTreePlacements = [];
 
-  // 1. Field-edge hedgerows across the agricultural valley & river bend
-  const cellMinX = -9;
-  const cellMaxX = 9;
-  const cellMinZ = -8;
-  const cellMaxZ = 11;
+  const heroQuota = { pine: 40, oak: 38, maple: 12 };
+  const heroCounts = { pine: 0, oak: 0, maple: 0 };
+
+  function hasNearbyHero(x, z, minDist) {
+    const minDistSq = minDist * minDist;
+    for (let i = 0; i < glbTreePlacements.length; i += 1) {
+      const p = glbTreePlacements[i];
+      const dx = p.x - x;
+      const dz = p.z - z;
+      if (dx * dx + dz * dz < minDistSq) return true;
+    }
+    return false;
+  }
+
+  function pickHeroTint(species) {
+    if (species === 'pine') {
+      return [
+        0.90 + random() * 0.15,
+        0.92 + random() * 0.16,
+        0.90 + random() * 0.15,
+      ];
+    }
+    if (species === 'maple') {
+      return [
+        0.98 + random() * 0.07,
+        0.92 + random() * 0.08,
+        0.88 + random() * 0.08,
+      ];
+    }
+    // Oak: follow pickBroadleafColor green-family palette but keep near 1.0 (0.85-1.10) so leaf texture stays vibrant
+    const roll = random();
+    const base = roll < 0.32
+      ? [0.89, 1.00, 0.89]
+      : roll < 0.66
+        ? [0.89, 1.02, 0.98]
+        : [0.98, 1.06, 0.87];
+    const jitter = (random() - 0.5) * 0.06;
+    return [
+      clamp(base[0] + jitter, 0.85, 1.10),
+      clamp(base[1] + jitter, 0.85, 1.10),
+      clamp(base[2] + jitter, 0.85, 1.10),
+    ];
+  }
+
+  function trySelectHero(species, x, y, z, rot, poolBudget, minDist = 18) {
+    if (!poolBudget[species] || poolBudget[species] <= 0) return false;
+    if (heroCounts[species] >= heroQuota[species]) return false;
+    if (hasNearbyHero(x, z, minDist)) return false;
+    poolBudget[species] -= 1;
+    heroCounts[species] += 1;
+    glbTreePlacements.push({
+      species,
+      x,
+      y,
+      z,
+      scale: 0.90 + random() * 0.40,
+      rot,
+      tint: pickHeroTint(species),
+    });
+    return true;
+  }
+
+  // 0. Populate dense clustered GLB hero stands (5-9 trees per cluster, 8-14m intra-cluster spacing)
+  for (let ci = 0; ci < HERO_CLUSTERS.length; ci += 1) {
+    const cl = HERO_CLUSTERS[ci];
+    const budget = { pine: cl.pine, oak: cl.oak, maple: cl.maple };
+    const queue = [];
+    for (let k = 0; k < cl.oak; k += 1) queue.push('oak');
+    for (let k = 0; k < cl.maple; k += 1) queue.push('maple');
+    for (let k = 0; k < cl.pine; k += 1) queue.push('pine');
+    for (let qi = 0; qi < queue.length; qi += 1) {
+      const sp = queue[qi];
+      for (let tries = 0; tries < 80; tries += 1) {
+        const ang = random() * Math.PI * 2;
+        const rad = Math.sqrt(random()) * cl.r;
+        const x = cl.x + Math.cos(ang) * rad;
+        const z = cl.z + Math.sin(ang) * rad;
+        if (isTreeForbidden(x, z)) continue;
+        const h = sampleMeshHeight(x, z);
+        const ny = terrainNormalY(x, z);
+        if (h < 3.5 || h > 345 || ny < 0.62) continue;
+        const minDist = tries < 50 ? 9.0 : 7.5;
+        if (trySelectHero(sp, x, h - 0.25, z, random() * Math.PI * 2, budget, minDist)) break;
+      }
+    }
+  }
+
+  // 1. Field-edge hedgerows strictly inside the compact agricultural valley (keep canyon rim & hills wild)
+  const cellMinX = -7;
+  const cellMaxX = 7;
+  const cellMinZ = -3;
+  const cellMaxZ = 10;
   for (let cz = cellMinZ; cz <= cellMaxZ; cz += 1) {
     for (let cx = cellMinX; cx <= cellMaxX; cx += 1) {
       const worldApproxZ = cz * FIELD_H;
-      const prob = worldApproxZ > 240 ? 0.56 : 0.46;
+      const prob = worldApproxZ > 240 ? 0.54 : 0.44;
       if (cellHash(cx, cz, 707) < prob) {
         const rx0 = cx * FIELD_W;
         const rx1 = (cx + 1) * FIELD_W;
@@ -2964,90 +3708,152 @@ export function buildTreesMesh(random) {
   }
 
   const treeTint = () => [
-    0.90 + random() * 0.20,
-    0.92 + random() * 0.16,
-    0.88 + random() * 0.20,
+    0.78 + random() * 0.42,
+    0.82 + random() * 0.36,
+    0.76 + random() * 0.40,
   ];
 
-  // 2. Zoned woodland placement across the 10,400m world (~620 general + ~420 dense forest + ~125 town/wetland)
+  const placeSpeciesTree = (x, h, ny, z, zones, scale, shade, rot, tint) => {
+    const typeRoll = random();
+    const snowAmt = zones.plateau > 0.45 ? 0 : smooth01((h - 155) / 90);
+    if (zones.wetland > 0.45 && h < 8) {
+      addSmoothCanopy(b, x, h + 1.4, z, 2.8 * scale, 1.9 * scale, 2.8 * scale, 0.17 * shade * tint[0], 0.34 * shade * tint[1], 0.16 * shade * tint[2], 6, 3, rot);
+    } else if (h > 130 || zones.mountain > 0.35 || (h > 65 && ny < 0.88) || typeRoll < lerp(0.34, 0.68, zones.forest)) {
+      addConiferTree(b, x, h - 0.25, z, scale, shade, rot, tint, pickConiferColor(random), snowAmt);
+    } else if (typeRoll < 0.82) {
+      addBroadleafTree(b, x, h - 0.25, z, scale, shade, rot, tint, pickBroadleafColor(x, z, random));
+    } else {
+      addPoplarTree(b, x, h - 0.25, z, scale, shade, rot, tint, pickPoplarColor(x, z, random));
+    }
+  };
+
+  // 2. Zoned woodland placement across the 10,400m world (~780 general + ~480 dense forest + ~220 corridor + ~135 town/village)
   let placed = 0;
   let attempts = 0;
-  while (placed < 620 && attempts < 9600) {
+  while (placed < 780 && attempts < 13000) {
     attempts += 1;
     const x = (random() * 2 - 1) * (WORLD.half - 240);
     const z = (random() * 2 - 1) * (WORLD.half - 240);
-    if (isTreeForbidden(x, z)) continue;
+    if (isTreeForbidden(x, z) || isInHeroCluster(x, z)) continue;
     const h = sampleMeshHeight(x, z);
     const ny = terrainNormalY(x, z);
-    if (h < 2.8 || h > 235 || ny < 0.74) continue;
+    if (h < 2.8 || h > 365 || ny < 0.68) continue;
     const zones = sampleZoneWeights(x, z);
     const cluster = valueNoise2D(x * 0.0022, z * 0.0022, 404);
-    const threshold = lerp(0.46, 0.24, zones.forest) + zones.mountain * 0.16;
+    const threshold = lerp(0.40, 0.20, Math.max(zones.forest, zones.hills * 0.6)) + zones.mountain * 0.12;
     if (cluster < threshold) continue;
 
-    const scale = 0.70 + random() * 0.80;
-    const shade = (0.86 + random() * 0.26) * lerp(1.0, 0.82, zones.forest);
-    const tint = treeTint();
+    const scale = 0.58 + random() * 1.08;
+    const shade = (0.86 + random() * 0.30) * lerp(1.0, 0.86, zones.forest);
     const rot = random() * Math.PI * 2;
-    const typeRoll = random();
-    if (zones.wetland > 0.45 && h < 8) {
-      addSmoothCanopy(b, x, h + 1.4, z, 2.8 * scale, 1.9 * scale, 2.8 * scale, 0.17 * shade * tint[0], 0.34 * shade * tint[1], 0.16 * shade * tint[2], 7, 3, rot);
-    } else if (h > 50 || zones.mountain > 0.4 || typeRoll < lerp(0.45, 0.72, zones.forest)) {
-      addConiferTree(b, x, h - 0.25, z, scale, shade, rot, tint);
-    } else if (typeRoll < 0.84) {
-      addBroadleafTree(b, x, h - 0.25, z, scale, shade, rot, tint);
-    } else {
-      addPoplarTree(b, x, h - 0.25, z, scale, shade, rot, tint);
-    }
+    const tint = treeTint();
+    placeSpeciesTree(x, h, ny, z, zones, scale, shade, rot, tint);
     placed += 1;
   }
 
-  // 2b. Dense Emerald Forest zone (East & Northeast, ~420 darker clustered trees)
+  // 2b. Dense Emerald Forest & Highland Rim zone (East & Northeast, ~480 multi-tone trees)
   let forestPlaced = 0;
   let forestAttempts = 0;
-  while (forestPlaced < 420 && forestAttempts < 4200) {
+  while (forestPlaced < 480 && forestAttempts < 5200) {
     forestAttempts += 1;
-    const x = 820 + random() * 3400;
-    const z = -1950 + random() * 2900;
-    if (isTreeForbidden(x, z)) continue;
+    const x = 750 + random() * 3400;
+    const z = -1950 + random() * 3200;
+    if (isTreeForbidden(x, z) || isInHeroCluster(x, z)) continue;
     const h = sampleMeshHeight(x, z);
     const ny = terrainNormalY(x, z);
-    if (h < 4.0 || h > 160 || ny < 0.72) continue;
+    if (h < 4.0 || h > 325 || ny < 0.68) continue;
     const zones = sampleZoneWeights(x, z);
-    if (zones.forest < 0.25) continue;
+    if (zones.forest < 0.18 && zones.plateau < 0.25) continue;
 
-    const scale = 0.72 + random() * 0.78;
-    const shade = 0.72 + random() * 0.24;
+    const scale = 0.60 + random() * 1.06;
+    const shade = 0.78 + random() * 0.30;
     const tint = treeTint();
     const rot = random() * Math.PI * 2;
-    if (random() < 0.74) addConiferTree(b, x, h - 0.25, z, scale, shade, rot, tint);
-    else addBroadleafTree(b, x, h - 0.25, z, scale, shade, rot, tint);
+    const snowAmt = zones.plateau > 0.45 ? 0 : smooth01((h - 155) / 90);
+    if (random() < 0.64) addConiferTree(b, x, h - 0.25, z, scale, shade, rot, tint, pickConiferColor(random), snowAmt);
+    else addBroadleafTree(b, x, h - 0.25, z, scale, shade, rot, tint, pickBroadleafColor(x, z, random));
     forestPlaced += 1;
   }
 
-  // 3. Extra groves flanking the final-approach corridor & title-screen backdrop (~190)
+  // 3. Extra colorful groves flanking the approach corridor & Mirror Lake / foothills (~240)
   let corridorPlaced = 0;
   let corridorAttempts = 0;
-  while (corridorPlaced < 190 && corridorAttempts < 2400) {
+  while (corridorPlaced < 240 && corridorAttempts < 3000) {
     corridorAttempts += 1;
     const side = random() < 0.5 ? -1 : 1;
-    const x = side * (46 + random() * 480);
-    const z = 340 + random() * 1400;
-    if (isTreeForbidden(x, z)) continue;
+    const x = side * (46 + random() * 640);
+    const z = -1450 + random() * 3200;
+    if (isTreeForbidden(x, z) || isInHeroCluster(x, z)) continue;
     const h = sampleMeshHeight(x, z);
     const ny = terrainNormalY(x, z);
-    if (h < 3.5 || h > 60 || ny < 0.84) continue;
-    if (valueNoise2D(x * 0.004, z * 0.004, 515) < 0.34) continue;
+    if (h < 3.5 || h > 160 || ny < 0.76) continue;
+    if (valueNoise2D(x * 0.004, z * 0.004, 515) < 0.30) continue;
 
-    const scale = 0.70 + random() * 0.80;
-    const shade = 0.88 + random() * 0.24;
+    const scale = 0.58 + random() * 1.08;
+    const shade = 0.86 + random() * 0.28;
     const tint = treeTint();
     const rot = random() * Math.PI * 2;
     const typeRoll = random();
-    if (typeRoll < 0.36) addConiferTree(b, x, h - 0.25, z, scale, shade, rot, tint);
-    else if (typeRoll < 0.78) addBroadleafTree(b, x, h - 0.25, z, scale, shade, rot, tint);
-    else addPoplarTree(b, x, h - 0.25, z, scale, shade, rot, tint);
+    if (typeRoll < 0.28) addConiferTree(b, x, h - 0.25, z, scale, shade, rot, tint, pickConiferColor(random), 0);
+    else if (typeRoll < 0.76) addBroadleafTree(b, x, h - 0.25, z, scale, shade, rot, tint, pickBroadleafColor(x, z, random));
+    else addPoplarTree(b, x, h - 0.25, z, scale, shade, rot, tint, pickPoplarColor(x, z, random));
     corridorPlaced += 1;
+  }
+
+  // 3b. Alpine foothills & Mirror Lake north-shore woodland belt (~330 trees for visible slope color layering)
+  let alpineWoodPlaced = 0;
+  let alpineWoodAttempts = 0;
+  while (alpineWoodPlaced < 330 && alpineWoodAttempts < 5200) {
+    alpineWoodAttempts += 1;
+    const inNorthShore = alpineWoodPlaced < 135;
+    const x = inNorthShore ? -1100 + random() * 2700 : -2650 + random() * 1450;
+    const z = inNorthShore ? -3050 + random() * 750 : -2300 + random() * 1650;
+    if (isTreeForbidden(x, z) || isInHeroCluster(x, z)) continue;
+    const h = sampleMeshHeight(x, z);
+    const ny = terrainNormalY(x, z);
+    if (h < 6.0 || h > 345 || ny < 0.62) continue;
+    if (valueNoise2D(x * 0.0028, z * 0.0028, 727) < 0.24) continue;
+
+    const scale = 0.64 + random() * 1.12;
+    const shade = 0.84 + random() * 0.28;
+    const tint = treeTint();
+    const rot = random() * Math.PI * 2;
+    const snowAmt = smooth01((h - 165) / 90);
+    if (h > 225 || random() < 0.48) addConiferTree(b, x, h - 0.25, z, scale, shade, rot, tint, pickConiferColor(random), snowAmt);
+    else if (random() < 0.74) addBroadleafTree(b, x, h - 0.25, z, scale, shade, rot, tint, pickBroadleafColor(x, z, random));
+    else addPoplarTree(b, x, h - 0.25, z, scale, shade, rot, tint, pickPoplarColor(x, z, random));
+    alpineWoodPlaced += 1;
+  }
+
+  // 3c. Dense overlapping woodland stand pockets on Emerald Forest & west Mirror Lake outer slopes (~110)
+  let grovePlaced = 0;
+  let groveAttempts = 0;
+  const groveCenters = [
+    { x: 1420, z: -1200, r: 175 },
+    { x: -1380, z: -2020, r: 145 },
+  ];
+  while (grovePlaced < 110 && groveAttempts < 1400) {
+    groveAttempts += 1;
+    const groveIdx = grovePlaced % groveCenters.length;
+    const gc = groveCenters[groveIdx];
+    const ang = random() * Math.PI * 2;
+    const rad = Math.pow(random(), 0.72) * gc.r;
+    const x = gc.x + Math.cos(ang) * rad;
+    const z = gc.z + Math.sin(ang) * rad;
+    if (isTreeForbidden(x, z) || isInHeroCluster(x, z)) continue;
+    const h = sampleMeshHeight(x, z);
+    const ny = terrainNormalY(x, z);
+    if (h < 5.0 || h > 290 || ny < 0.64) continue;
+    const scale = 0.86 + random() * 0.88;
+    const shade = 0.80 + random() * 0.30;
+    const tint = treeTint();
+    const rot = random() * Math.PI * 2;
+    const snowAmt = smooth01((h - 165) / 90);
+    const tr = random();
+    if (tr < 0.46) addConiferTree(b, x, h - 0.25, z, scale, shade, rot, tint, pickConiferColor(random), snowAmt);
+    else if (tr < 0.84) addBroadleafTree(b, x, h - 0.25, z, scale, shade, rot, tint, pickBroadleafColor(x, z, random));
+    else addPoplarTree(b, x, h - 0.25, z, scale, shade, rot, tint, pickPoplarColor(x, z, random));
+    grovePlaced += 1;
   }
 
   // 4. Village & Oakwood Town garden/avenue trees (~135)
@@ -3058,7 +3864,7 @@ export function buildTreesMesh(random) {
     const inTown = villagePlaced >= 60;
     const x = inTown ? TOWN_CENTER.x + (random() * 2 - 1) * 260 : -325 + random() * 195;
     const z = inTown ? TOWN_CENTER.z + (random() * 2 - 1) * 260 : -85 + random() * 290;
-    if (isTreeForbidden(x, z)) continue;
+    if (isTreeForbidden(x, z) || isInHeroCluster(x, z)) continue;
     const h = sampleMeshHeight(x, z);
     if (h < 4 || h > 45) continue;
 
@@ -3067,9 +3873,9 @@ export function buildTreesMesh(random) {
     const tint = treeTint();
     const rot = random() * Math.PI * 2;
     const typeRoll = random();
-    if (typeRoll < 0.55) addBroadleafTree(b, x, h - 0.2, z, scale, shade, rot, tint);
-    else if (typeRoll < 0.85) addPoplarTree(b, x, h - 0.2, z, scale, shade, rot, tint);
-    else addConiferTree(b, x, h - 0.2, z, scale, shade, rot, tint);
+    if (typeRoll < 0.56) addBroadleafTree(b, x, h - 0.2, z, scale, shade, rot, tint, pickBroadleafColor(x, z, random));
+    else if (typeRoll < 0.86) addPoplarTree(b, x, h - 0.2, z, scale, shade, rot, tint, pickPoplarColor(x, z, random));
+    else addConiferTree(b, x, h - 0.2, z, scale, shade, rot, tint, pickConiferColor(random), 0);
     villagePlaced += 1;
   }
 
@@ -3132,7 +3938,8 @@ export function buildCloudsMesh(random) {
   for (let i = 0; i < 42; i += 1) {
     const cx = (random() * 2 - 1) * (WORLD.half * 0.92);
     const cz = (random() * 2 - 1) * (WORLD.half * 0.92);
-    const cy = 420 + random() * 230;
+    const minCy = Math.max(780, terrainHeight(cx, cz) + 330);
+    const cy = minCy + random() * 220;
     const clusterScale = 0.90 + random() * 0.75;
 
     addCloudBlob(
